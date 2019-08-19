@@ -1,0 +1,8 @@
+prefix=/home/nikita/ABAGY/kinematics_task/src/kinematics_test/cmake-build-default/devel
+
+Name: kinematics_test
+Description: Description of kinematics_test
+Version: 0.0.0
+Cflags: 
+Libs: -L/home/nikita/ABAGY/kinematics_task/src/kinematics_test/cmake-build-default/devel/lib 
+Requires: 

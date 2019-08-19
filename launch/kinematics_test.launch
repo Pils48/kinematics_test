@@ -1,0 +1,11 @@
+<launch>
+  <include file="/home/nikita/ABAGY/kinematics_task/src/fanuc/fanuc_m20ia_moveit_config/launch/planning_context.launch">
+    <arg name="load_robot_description" value="true"/>
+  </include>
+  <node name="kinematics_test"
+        pkg="kinematics_test"
+        type="robot_state_publisher"
+        respawn="false" output="screen">
+    <rosparam command="load" file="/home/nikita/ABAGY/kinematics_task/src/fanuc/fanuc_m20ia_moveit_config/config/kinematics.yaml"/>
+  </node>
+</launch>
