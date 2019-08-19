@@ -6,8 +6,11 @@
 #include <ros/ros.h>
 
 #include <vector>
+#include <math.h>
 #include <chrono>
 #include <thread>
+#include <geometric_shapes/shape_operations.h>
+#include <geometric_shapes/shapes.h>
 #include <Eigen/Geometry>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit/move_group_interface/move_group_interface.h>
@@ -24,7 +27,6 @@
 using namespace std;
 using namespace moveit;
 using namespace core;
-
 
 vector<robot_state::RobotStatePtr> linearInterpolation(robot_state::RobotState kinematic_state,
         Eigen::Affine3d& goal_transform,
@@ -84,6 +86,9 @@ map<string, vector<pair<double, double> > > findLinksDistance(vector<robot_state
         key_value.second = vector<pair<double, double> >(trail.size() - 1);
 
         const LinkModel* ptr_link = current_state.getLinkModel(link_name);
+        const shapes::Shape* link_mesh = ptr_link->getShapes().at(0).get();
+        Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
+
         for (size_t i = 0; i < trail.size() - 1; i++){
 
             Eigen::Affine3d state = trail[i]->getGlobalLinkTransform(link_name);
@@ -91,9 +96,10 @@ map<string, vector<pair<double, double> > > findLinksDistance(vector<robot_state
 
             Eigen::Quaterniond start_quaternion(state.rotation());
             Eigen::Quaterniond target_quaternion(next_state.rotation());
+            Eigen::Quaterniond trans_quaternion = target_quaternion * start_quaternion.inverse();
+
             double rotation_distance = start_quaternion.angularDistance(target_quaternion);
             double translation_distance = (next_state.translation() - state.translation()).norm();
-
             key_value.second.data()->first = rotation_distance;
             key_value.second.data()->second = translation_distance;
 
@@ -170,28 +176,6 @@ int main(int argc, char** argv)
 
     map<string, vector<pair<double, double> > > links_distances = findLinksDistance(traj, kinematic_state);
 
-    moveit_msgs::CollisionObject box;
-
-    box.header.frame_id = "/base_link";
-    box.id = "box";
-
-    shape_msgs::SolidPrimitive primitive;
-    primitive.type = primitive.BOX;
-    primitive.dimensions.resize(3);
-    primitive.dimensions[0] = 0.3;
-    primitive.dimensions[1] = 0.3;
-    primitive.dimensions[2] = 0.3;
-
-    geometry_msgs::Pose box_pose;
-    box_pose.orientation.w = 1.0;
-    box_pose.position.x =  0.4;
-    box_pose.position.y =  0.419;
-    box_pose.position.z =  0.0;
-
-    box.primitives.push_back(primitive);
-    box.primitive_poses.push_back(box_pose);
-    box.operation = box.ADD;
-
     moveit_msgs::RobotTrajectory traj_msg;
     trail.getRobotTrajectoryMsg(traj_msg);
 //    bool success = visual_tools.publishTrajectoryPath(trail);
@@ -200,47 +184,17 @@ int main(int argc, char** argv)
     Eigen::Affine3d text_pose = Eigen::Affine3d::Identity();
     text_pose.translation().z() = 1.75;
     visual_tools.publishText(text_pose, "Motion Planning API Demo", rvt::WHITE, rvt::XLARGE);
-
     visual_tools.trigger();
     visual_tools.publishRobotState(kinematic_state, rvt::WHITE);
-    auto scene = kt_planning_scene_monitor.getPlanningScene();
-    visual_tools.publishRobotState(scene->getCurrentStateNonConst(), rvt::LIME_GREEN);
 
-    visual_tools.loadMarkerPub();
-    std::vector<moveit_msgs::CollisionObject> collision_objects;
-    collision_objects.push_back(box);
-    planning_scene_interface.addCollisionObjects(collision_objects);
-    visual_tools.trigger();
-    success = visual_tools.publishCollisionBlock(box_pose, "box", 0.1, rvt::BLUE);
+    kt_planning_scene->getCollisionRobot();
 
-
+    //Visualize trajectory
      for (std::size_t i = 0; i < traj.size(); i++){
          std::this_thread::sleep_for(std::chrono::milliseconds(200));
          visual_tools.publishRobotState(traj[i]);
          std::this_thread::sleep_for(std::chrono::milliseconds(200));
          visual_tools.deleteAllMarkers();
      }
-
-//
-//    const Eigen::Affine3d obj_pose = Eigen::Affine3d::Identity();
-//    const shapes::ShapeConstPtr plane(new shapes::Plane(2, -0.1, 2, -1));
-//
-////    shape_msgs::Plane plane_msg();
-////    visual_tools.publishXYPlane(goal_transform, rvt::colors::GREEN);
-////    auto dbg_shape = plane.get();
-////    shapes::ShapeType dbg_val = dbg_shape->type;
-//    world->addToObject("obstacle", plane, goal_transform);
-////    planning_scene->getColl
-//
-
-//     planning_scene.
-
-//    std::vector<std::string> object_ids = world->getObjectIds();
-//    for (std::string obj_id : object_ids)
-//        ROS_INFO(obj_id.c_str());
-//    visual_tools.triggerPlanningSceneUpdate();
-
-
-
 
 }
