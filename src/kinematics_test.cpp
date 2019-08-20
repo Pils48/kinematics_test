@@ -6,7 +6,6 @@
 #include <ros/ros.h>
 
 #include <vector>
-#include <math.h>
 #include <chrono>
 #include <thread>
 #include <geometric_shapes/shape_operations.h>
@@ -73,21 +72,25 @@ vector<robot_state::RobotStatePtr> linearInterpolation(robot_state::RobotState k
     return trail;
 }
 
-map<string, vector<pair<double, double> > > findLinksDistance(vector<robot_state::RobotStatePtr>& trail,
+map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail,
         robot_state::RobotState& current_state){
 
-    map<string, vector<pair<double, double> > > result_distances;
+    map<string, double*> result_distances;
 
     for (size_t idx = 1; idx <= 6; idx++){
 
         string link_name = string("link_") + to_string(idx);
-        pair<string, vector<pair<double, double> > > key_value;
+        pair<string, double*> key_value;
         key_value.first = link_name;
-        key_value.second = vector<pair<double, double> >(trail.size() - 1);
+        double link_distances[trail.size() - 1];
+        key_value.second = link_distances;
 
         const LinkModel* ptr_link = current_state.getLinkModel(link_name);
+
+        //Work with the greatest translation of the link
         const shapes::Shape* link_mesh = ptr_link->getShapes().at(0).get();
         Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
+        Eigen::Affine3d mesh_origin_transform = ptr_link->getVisualMeshOrigin();
 
         for (size_t i = 0; i < trail.size() - 1; i++){
 
@@ -96,18 +99,31 @@ map<string, vector<pair<double, double> > > findLinksDistance(vector<robot_state
 
             Eigen::Quaterniond start_quaternion(state.rotation());
             Eigen::Quaterniond target_quaternion(next_state.rotation());
+            //Quaternion start_quaternion --> target_quaternion
+            //target_quaternion = trans_quaternion * start_quaternion =>
+            // => trans_quaternion = target_quaternion * start_quaternion^(-1)
             Eigen::Quaterniond trans_quaternion = target_quaternion * start_quaternion.inverse();
 
-            double rotation_distance = start_quaternion.angularDistance(target_quaternion);
-            double translation_distance = (next_state.translation() - state.translation()).norm();
-            key_value.second.data()->first = rotation_distance;
-            key_value.second.data()->second = translation_distance;
+            //Get the farthest point
+            int x_coeff, y_coeff, z_coeff;
+            mesh_origin_transform(0, 0) > 0 ? x_coeff = 1 : x_coeff = -1;
+            mesh_origin_transform(1, 1) > 0 ? y_coeff = 1 : y_coeff = -1;
+            mesh_origin_transform(2, 2) > 0 ? z_coeff = 1 : z_coeff = -1;
 
-            ROS_INFO("%s rotation distance: %f; translation distance: %f", link_name.c_str(), rotation_distance,
-                     translation_distance);
+            Eigen::Vector3d diagonal_point_link = Eigen::Vector3d(x_coeff * link_extends(0) / 2,
+                    y_coeff * link_extends(1) / 2, z_coeff * link_extends(2) / 2);
+            Eigen::Vector3d diagonal_point_global = mesh_origin_transform * diagonal_point_link;
+            //Rotate vector(global_origin, diagonal_point_link)
+            Eigen::Vector3d end_point_global = trans_quaternion.toRotationMatrix() * diagonal_point_global;
+            double linear_angular_distance = (end_point_global - diagonal_point_global).norm();
+
+            double translation_distance = (next_state.translation() - state.translation()).norm() + linear_angular_distance;
+            key_value.second[i] = translation_distance;
+
+            ROS_INFO("%s the greatest translation distance: %f", link_name.c_str(), translation_distance);
         }
 
-        result_distances.insert(result_distances.begin(), key_value);
+        result_distances.insert(result_distances.end(), key_value);
     }
 
     return result_distances;
@@ -174,7 +190,7 @@ int main(int argc, char** argv)
         trail.addSuffixWayPoint(state, 1.0);
     }
 
-    map<string, vector<pair<double, double> > > links_distances = findLinksDistance(traj, kinematic_state);
+    map<string, double*> links_distances = findLinksDistance(traj, kinematic_state);
 
     moveit_msgs::RobotTrajectory traj_msg;
     trail.getRobotTrajectoryMsg(traj_msg);
