@@ -27,19 +27,21 @@ using namespace std;
 using namespace moveit;
 using namespace core;
 
-vector<robot_state::RobotStatePtr> linearInterpolation(robot_state::RobotState kinematic_state,
-        Eigen::Affine3d& goal_transform,
+/** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
+ * for translation parametr. Return true in case of success.*/
+bool linearInterpolation(const std::vector<robot_state::RobotStatePtr>& trail,
+        robot_state::RobotState kinematic_state,
+        Eigen::Affine3d& goal_transform, JumpThreshold& jump_threshold,
 		const robot_state::JointModelGroup* jmg, size_t translation_steps, size_t rotation_steps, bool
 		global_reference_frame = true){
-    //Add JumpThreshold maintenance
+
+    std::vector<robot_state::RobotStatePtr> trail_copy = trail;
     robot_state::RobotState current_state();
-    std::vector<robot_state::RobotStatePtr> trail(0);
-    trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
+    trail_copy.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
     const moveit::core::LinkModel* ptr_link_model = kinematic_state.getLinkModel("tool0");
     // effector
 
     Eigen::Affine3d start_pose = kinematic_state.getGlobalLinkTransform(ptr_link_model);
-    double* dbg_value = start_pose.data();
 
     // the target can be in the local reference frame (in which case we rotate it)
     Eigen::Affine3d rotated_target = global_reference_frame ? goal_transform : start_pose * goal_transform;
@@ -51,7 +53,28 @@ vector<robot_state::RobotStatePtr> linearInterpolation(robot_state::RobotState k
 
     std::size_t steps = std::max(translation_steps, rotation_steps) + 1;
 
-//    double last_valid_percentage = 0.0;
+    std::vector<double> consistency_limits;
+    if (jump_threshold.prismatic > 0 || jump_threshold.revolute > 0)
+        for (const JointModel* jm : jmg->getActiveJointModels())
+        {
+            double limit;
+            switch (jm->getType())
+            {
+                case JointModel::REVOLUTE:
+                    limit = jump_threshold.revolute;
+                    break;
+                case JointModel::PRISMATIC:
+                    limit = jump_threshold.prismatic;
+                    break;
+                default:
+                    limit = 0.0;
+            }
+            if (limit == 0.0)
+                limit = jm->getMaximumExtent();
+            consistency_limits.push_back(limit);
+        }
+
+    double last_valid_percentage = 0.0;
     for (std::size_t i = 1; i <= steps; ++i)
     {
         double percentage = (double)i / (double)steps;
@@ -62,14 +85,18 @@ vector<robot_state::RobotStatePtr> linearInterpolation(robot_state::RobotState k
         pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
         double* dbg_value = pose.translation().data();
 
-        if (kinematic_state.setFromIK(jmg, pose, ptr_link_model->getName()))
-            trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
-        else
-            break;
-
-//        last_valid_percentage = percentage;
+        if (kinematic_state.setFromIK(jmg, pose, ptr_link_model->getName(), consistency_limits))
+            trail_copy.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
+        else{
+            ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
+            return false;
+        }
+        last_valid_percentage = percentage;
     }
-    return trail;
+//    last_valid_percentage *= CartesianInterpolator::checkJointSpaceJump(jmg, trail_copy,
+//            jump_threshold);
+
+    return true;
 }
 
 map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail,
@@ -104,7 +131,10 @@ map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail
             // => trans_quaternion = target_quaternion * start_quaternion^(-1)
             Eigen::Quaterniond trans_quaternion = target_quaternion * start_quaternion.inverse();
 
-            //Get the farthest point
+            /**Get the farthest point:
+             *take the point, that has a maximum distance to global origin, in case of different axis orientation
+             * introduce coefficients that will mean whether we should add or subtract half extend size
+            */
             int x_coeff, y_coeff, z_coeff;
             mesh_origin_transform(0, 0) > 0 ? x_coeff = 1 : x_coeff = -1;
             mesh_origin_transform(1, 1) > 0 ? y_coeff = 1 : y_coeff = -1;
@@ -125,7 +155,6 @@ map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail
 
         result_distances.insert(result_distances.end(), key_value);
     }
-
     return result_distances;
 };
 
@@ -182,8 +211,13 @@ int main(int argc, char** argv)
     kinematic_state.setFromIK(joint_model_group, start_pose);
     visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
 
-    vector<robot_state::RobotStatePtr> traj = linearInterpolation(kinematic_state, goal_transform,
-            joint_model_group, 6, 6); //Approximate steps
+    JumpThreshold jump_threshold;
+    jump_threshold.prismatic = 5.0;
+    jump_threshold.factor = 1.0;
+    jump_threshold.revolute = 1.0;
+    std::vector<robot_state::RobotStatePtr> traj(0);
+    bool success = linearInterpolation(traj, kinematic_state, goal_transform,
+            jump_threshold, joint_model_group, 6, 6); //Approximate steps
 
     robot_trajectory::RobotTrajectory trail(kinematic_model, joint_model_group);
     for (robot_state::RobotStatePtr state : traj){
@@ -195,7 +229,7 @@ int main(int argc, char** argv)
     moveit_msgs::RobotTrajectory traj_msg;
     trail.getRobotTrajectoryMsg(traj_msg);
 //    bool success = visual_tools.publishTrajectoryPath(trail);
-    bool success = visual_tools.publishTrajectoryLine(traj_msg, joint_model_group, rvt::colors::GREEN);
+    success = visual_tools.publishTrajectoryLine(traj_msg, joint_model_group, rvt::colors::GREEN);
     visual_tools.trigger();
     Eigen::Affine3d text_pose = Eigen::Affine3d::Identity();
     text_pose.translation().z() = 1.75;
