@@ -23,21 +23,23 @@
 #include <moveit_msgs/CollisionObject.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
+#define STANDARD_INTERPOLATION_STEP 0.01
+#define EXPERIMENTAL_DISTANCE_CONSTRAINT 2
+
 using namespace std;
 using namespace moveit;
 using namespace core;
 
 /** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
- * for translation parametr. Return true in case of success.*/
-bool linearInterpolation(const std::vector<robot_state::RobotStatePtr>& trail,
-        robot_state::RobotState kinematic_state,
-        Eigen::Affine3d& goal_transform, JumpThreshold& jump_threshold,
-		const robot_state::JointModelGroup* jmg, size_t translation_steps, size_t rotation_steps, bool
-		global_reference_frame = true){
+ * for translation parameter. Return true in case of success.*/
+bool linearInterpolation(std::vector<robot_state::RobotStatePtr>& trail,
+        robot_state::RobotState kinematic_state, const Eigen::Affine3d& goal_transform, JumpThreshold& jump_threshold,
+        size_t translation_steps, bool global_reference_frame = true){
 
-    std::vector<robot_state::RobotStatePtr> trail_copy = trail;
+    const robot_state::JointModelGroup* jmg = kinematic_state.getJointModelGroup("manipulator");
+//    std::vector<robot_state::RobotStatePtr> trail_copy = trail;
     robot_state::RobotState current_state();
-    trail_copy.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
+    trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
     const moveit::core::LinkModel* ptr_link_model = kinematic_state.getLinkModel("tool0");
     // effector
 
@@ -51,7 +53,7 @@ bool linearInterpolation(const std::vector<robot_state::RobotStatePtr>& trail,
     double rotation_distance = start_quaternion.angularDistance(target_quaternion);
     double translation_distance = (rotated_target.translation() - start_pose.translation()).norm();
 
-    std::size_t steps = std::max(translation_steps, rotation_steps) + 1;
+    std::size_t steps = translation_steps + 1;
 
     std::vector<double> consistency_limits;
     if (jump_threshold.prismatic > 0 || jump_threshold.revolute > 0)
@@ -80,13 +82,12 @@ bool linearInterpolation(const std::vector<robot_state::RobotStatePtr>& trail,
         double percentage = (double)i / (double)steps;
 
         Eigen::Affine3d pose(start_quaternion.slerp(percentage, target_quaternion));
-        double* dbg_mtx = pose.data();
 
         pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
-        double* dbg_value = pose.translation().data();
 
         if (kinematic_state.setFromIK(jmg, pose, ptr_link_model->getName(), consistency_limits))
-            trail_copy.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
+            trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state))); //tmp work
+            // with original
         else{
             ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
             return false;
@@ -100,7 +101,7 @@ bool linearInterpolation(const std::vector<robot_state::RobotStatePtr>& trail,
 }
 
 map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail,
-        robot_state::RobotState& current_state){
+        robot_state::RobotState& current_state, double critical_distance){
 
     map<string, double*> result_distances;
 
@@ -126,9 +127,9 @@ map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail
 
             Eigen::Quaterniond start_quaternion(state.rotation());
             Eigen::Quaterniond target_quaternion(next_state.rotation());
-            //Quaternion start_quaternion --> target_quaternion
-            //target_quaternion = trans_quaternion * start_quaternion =>
-            // => trans_quaternion = target_quaternion * start_quaternion^(-1)
+            /**Quaternion start_quaternion --> target_quaternion
+             *target_quaternion = trans_quaternion * start_quaternion =>
+             *=> trans_quaternion = target_quaternion * start_quaternion^(-1)*/
             Eigen::Quaterniond trans_quaternion = target_quaternion * start_quaternion.inverse();
 
             /**Get the farthest point:
@@ -151,6 +152,21 @@ map<string, double*> findLinksDistance(vector<robot_state::RobotStatePtr>& trail
             key_value.second[i] = translation_distance;
 
             ROS_INFO("%s the greatest translation distance: %f", link_name.c_str(), translation_distance);
+            if (translation_distance >= critical_distance){
+                ROS_WARN("%s seams to pass to great distance: %f", link_name.c_str(), translation_distance);
+                //We twice steps number
+                JumpThreshold jump_threshold;
+                jump_threshold.prismatic = 5.0;
+                jump_threshold.factor = 1.0;
+                jump_threshold.revolute = 1.0; //Random values
+                robot_state::RobotState kinematic_state = *trail[0];
+                const Eigen::Affine3d& goal_transform = trail[trail.size() - 1]->getGlobalLinkTransform("tool0");
+                size_t translation_steps = (trail.size() - 1) * 2;
+                trail.clear();
+                bool is_interpolated = linearInterpolation(trail, kinematic_state, goal_transform,jump_threshold,
+                        translation_steps);
+                findLinksDistance(trail, kinematic_state, critical_distance);
+            }
         }
 
         result_distances.insert(result_distances.end(), key_value);
@@ -184,10 +200,16 @@ int main(int argc, char** argv)
 	namespace rvt = rviz_visual_tools;
 	visual_tools.deleteAllMarkers();
 	visual_tools.loadRemoteControl();
+
+    Eigen::Affine3d text_pose = Eigen::Affine3d::Identity();
+    text_pose.translation().z() = 1.75;
+    visual_tools.publishText(text_pose, " Demo", rvt::WHITE, rvt::XLARGE);
+    visual_tools.trigger();
+
 //	visual_tools.prompt("Press next to continue execution...");
     //end of initialization
 
-	/* Test trac-ik
+	/** Test trac-ik
 	kinematic_state.setToRandomPositions(joint_model_group);
 	const Eigen::Affine3d& end_effector_state = kinematic_state.getGlobalLinkTransform("tool0");
 	
@@ -207,37 +229,30 @@ int main(int argc, char** argv)
     kinematic_state.setToDefaultValues(); */
 
 	Eigen::Affine3d goal_transform(Eigen::Translation3d(1.0, 0.0, 0.4));
-    const Eigen::Affine3d start_pose(Eigen::Translation3d(1.0, -0.1, 0.2));
+    const Eigen::Affine3d start_pose(Eigen::Translation3d(1.0, 0.1, 0.3));
     kinematic_state.setFromIK(joint_model_group, start_pose);
     visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
 
     JumpThreshold jump_threshold;
     jump_threshold.prismatic = 5.0;
     jump_threshold.factor = 1.0;
-    jump_threshold.revolute = 1.0;
+    jump_threshold.revolute = 1.0; //Random values
     std::vector<robot_state::RobotStatePtr> traj(0);
-    bool success = linearInterpolation(traj, kinematic_state, goal_transform,
-            jump_threshold, joint_model_group, 6, 6); //Approximate steps
+
+    size_t approximate_steps = floor((goal_transform.translation() - start_pose.translation()).norm() /
+            STANDARD_INTERPOLATION_STEP);
+    bool is_interpolated = linearInterpolation(traj, kinematic_state, goal_transform,
+            jump_threshold, approximate_steps);
 
     robot_trajectory::RobotTrajectory trail(kinematic_model, joint_model_group);
-    for (robot_state::RobotStatePtr state : traj){
-        trail.addSuffixWayPoint(state, 1.0);
-    }
 
-    map<string, double*> links_distances = findLinksDistance(traj, kinematic_state);
+    map<string, double*> links_distances = findLinksDistance(traj, kinematic_state, EXPERIMENTAL_DISTANCE_CONSTRAINT);
 
-    moveit_msgs::RobotTrajectory traj_msg;
-    trail.getRobotTrajectoryMsg(traj_msg);
+//    moveit_msgs::RobotTrajectory traj_msg;
+//    trail.getRobotTrajectoryMsg(traj_msg);
 //    bool success = visual_tools.publishTrajectoryPath(trail);
-    success = visual_tools.publishTrajectoryLine(traj_msg, joint_model_group, rvt::colors::GREEN);
-    visual_tools.trigger();
-    Eigen::Affine3d text_pose = Eigen::Affine3d::Identity();
-    text_pose.translation().z() = 1.75;
-    visual_tools.publishText(text_pose, "Motion Planning API Demo", rvt::WHITE, rvt::XLARGE);
-    visual_tools.trigger();
-    visual_tools.publishRobotState(kinematic_state, rvt::WHITE);
-
-    kt_planning_scene->getCollisionRobot();
+//    bool success = visual_tools.publishTrajectoryLine(traj_msg, joint_model_group, rvt::colors::GREEN);
+//    visual_tools.trigger();
 
     //Visualize trajectory
      for (std::size_t i = 0; i < traj.size(); i++){
