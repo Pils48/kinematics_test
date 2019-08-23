@@ -25,7 +25,8 @@
 
 #define STANDARD_INTERPOLATION_STEP 0.01
 #define EXPERIMENTAL_DISTANCE_CONSTRAINT 0.005
-#define EXPERIMENTAL_ATTEMPT_NUMBER 10
+
+typedef bool (*validateFnc)(robot_state::RobotStatePtr, robot_state::RobotStatePtr, double, double);
 
 using namespace std;
 using namespace moveit;
@@ -75,63 +76,49 @@ bool linearInterpolation(vector<robot_state::RobotStatePtr>& trail,
 	return true;
 }
 
-bool isMoveValid(size_t state_idx, size_t next_state_idx, double critical_distance,
-                 vector<robot_state::RobotStatePtr>& trail){
-	
-	robot_state::RobotState current_state(trail[state_idx]->getRobotModel());
-	vector<robot_state::RobotStatePtr> segment_to_check(0);
-	bool is_interpolated = linearInterpolation(segment_to_check, current_state,
-	                                           trail[next_state_idx]->getGlobalLinkTransform("tool0"),1);
-	trail.insert(trail.begin() + next_state_idx, segment_to_check[1]);
-	return true;
-}
-
 double getFullTranslation(const robot_state::RobotStatePtr state, const robot_state::RobotStatePtr next_state,
                           Eigen::Vector3d& link_extends, string link_name){
+	
 	const Eigen::Affine3d state_transform = state->getGlobalLinkTransform(link_name);
 	const Eigen::Affine3d next_state_transform = next_state->getGlobalLinkTransform(link_name);
 	Eigen::Quaterniond start_quaternion(state_transform.rotation());
 	Eigen::Quaterniond target_quaternion(next_state_transform.rotation());
+	
 	//Find sin of angle between start_quaternion and target_quaternion
 	double sin_between_quaternions = 1 - pow(start_quaternion.dot(target_quaternion) / (start_quaternion.norm() *
 	                                                                                    target_quaternion.norm()), 2) ;
-	int x_coeff, y_coeff, z_coeff;
 	//Find which otctant
+	int x_coeff, y_coeff, z_coeff;
 	x_coeff = state_transform.translation()(0) > 0 ? 1 : -1;
 	y_coeff = state_transform.translation()(1) > 0 ? 1 : -1;
 	z_coeff = state_transform.translation()(2) > 0 ? 1 : -1;
 	
-	const Eigen::Translation3d origin_to_diagonal(x_coeff* link_extends[0] / 2, y_coeff * link_extends[1] / 2,
-	                                              z_coeff * link_extends[2] / 2);
+	const Eigen::Translation3d origin_to_diagonal(x_coeff* link_extends[0], y_coeff * link_extends[1],z_coeff * link_extends[2]);
+	//Translate origin on diagonal length
 	double linear_angular_distance = (state_transform.translation() + origin_to_diagonal.translation()).norm() *
 	                                 sin_between_quaternions;
-	double dbg_value = (state_transform.translation() - next_state_transform.translation()).norm();
-	
 	return (state_transform.translation() - next_state_transform.translation()).norm() + linear_angular_distance;
+	
 }
 
 pair<string, vector<double> > findLinkDistance(vector<robot_state::RobotStatePtr>& trail,
-                                               const robot_state::LinkModel* link, double critical_distance,
-                                               size_t jump_state_idx = 0, size_t attempt = 1){
+		const robot_state::LinkModel* link, double critical_distance, size_t jump_state_idx = 0){
 	
 	pair<string, vector<double> > result_pair;
+	
 	result_pair.first = link->getName();
 	vector<double> distances(0);
 	result_pair.second = distances;
 	
 	//Work with the greatest translation of the link
-	const shapes::Shape* link_mesh = link->getShapes().at(0).get(); //Refactor
+	//Get shape dimensions
+	auto link_mesh = link->getShapes()[0].get(); //Refactor
 	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
 	
 	for (size_t state_idx = 0; state_idx < trail.size() - 1; state_idx++){
 		
 		double translation_distance = getFullTranslation(trail[state_idx], trail[state_idx + 1],
 		                                                 link_extends, link->getName());
-		
-		if (attempt == EXPERIMENTAL_ATTEMPT_NUMBER){
-			ROS_ERROR("Space jump happened! Truncate trajectory after jump!");
-			return result_pair;
-		}
 		
 		while (translation_distance > critical_distance){
 			ROS_WARN("%s has to great translation: %f", link->getName().c_str(), translation_distance);
@@ -227,18 +214,11 @@ int main(int argc, char** argv)
 		for (size_t link_idx = 1; link_idx <= 6; link_idx++){
 			string link_name = string("link_") + to_string(link_idx);
 			pair<string, vector<double> > link_distance_pair = findLinkDistance(traj, kinematic_state.getLinkModel(link_name),
-			                                                                    EXPERIMENTAL_DISTANCE_CONSTRAINT);
+					EXPERIMENTAL_DISTANCE_CONSTRAINT);
 			links_distances.insert(links_distances.end(), link_distance_pair);
 		}
 	}
 	
-
-//    moveit_msgs::DisplayTrajectory traj_msg;
-//    moveit_msgs::RobotTrajectory traj_msg;
-//    trail.getRobotTrajectoryMsg(traj_msg);
-//    bool success = visual_tools.publishTrajectoryPath(trail);
-//    bool success = visual_tools.publishTrajectoryLine(traj_msg, joint_model_group, rvt::colors::GREEN);
-//    visual_tools.trigger();
 	
 	//Visualize trajectory
 	for (size_t i = 0; i < traj.size(); i++){
