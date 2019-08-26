@@ -106,13 +106,6 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 		list<robot_state::RobotStatePtr>::iterator next_state_it = state_it;
 		next_state_it++;
 		
-		//Checking collision for states
-		if (current_scene->isStateColliding(*state_it->get(), PLANNING_GROUP, true) ||
-				(current_scene->isStateColliding(*next_state_it->get(), PLANNING_GROUP, true))){
-			ROS_ERROR("Collision during the trajectory processing!");
-			throw runtime_error("Invalid trajectory!");
-		}
-		
 		//Remember previous translation distance to find out whether jump happened
 		double translation_distance = getFullTranslation(*state_it, *next_state_it,
 		                                                 link_extends, link->getName());
@@ -124,12 +117,7 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 			bool is_interpolated = linearInterpolation(segment_to_check, **state_it,
 					(*next_state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
 			if (is_interpolated){
-				//Check collision for medium state
 				list<robot_state::RobotStatePtr>::iterator it = ++segment_to_check.begin();
-				if (current_scene->isStateColliding(*it->get(), PLANNING_GROUP, true)){
-					ROS_ERROR("Collision during the trajectory processing!");
-					throw runtime_error("Invalid trajectory!");
-				}
 				trail.insert(next_state_it, *it);
 				next_state_it--;
 				translation_distance = getFullTranslation(*state_it, *next_state_it,
@@ -183,7 +171,7 @@ int main(int argc, char** argv)
 	visual_tools.publishText(text_pose, "Kinematic_test demo", rvt::WHITE, rvt::XLARGE);
 	visual_tools.trigger();
 
-//	visual_tools.prompt("Press next to continue execution...");
+	visual_tools.prompt("Press next to continue execution...");
 	//end of initialization
 	
 	/** Test trac-ik
@@ -207,7 +195,7 @@ int main(int argc, char** argv)
 	
 	const Eigen::Affine3d tool0_frame = kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 	
-	Eigen::Affine3d goal_transform(Eigen::Translation3d(1, 0, 0)); //sx -1 sy 1 sz 1,5
+	Eigen::Affine3d goal_transform(Eigen::Translation3d(-0.2, 0, 0.5));
 	const Eigen::Affine3d start_pose(Eigen::Translation3d(0.0, 0.0, 0.0));
 	kinematic_state.setFromIK(joint_model_group, tool0_frame * start_pose);
 	visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
@@ -215,7 +203,17 @@ int main(int argc, char** argv)
 	list<robot_state::RobotStatePtr> traj(0);
 	size_t approximate_steps = floor((goal_transform.translation() - start_pose.translation()).norm() /
 	                                 STANDARD_INTERPOLATION_STEP);
-	bool is_interpolated = linearInterpolation(traj, kinematic_state, goal_transform, approximate_steps);
+	bool is_interpolated = linearInterpolation(traj, kinematic_state, goal_transform, approximate_steps, false);
+	
+	thread collision_check_thread([](list<robot_state::RobotStatePtr> traj,
+	                                 planning_scene::PlanningScenePtr current_scene){
+		for (robot_state::RobotStatePtr state : traj){
+			if (current_scene->isStateColliding(*state, PLANNING_GROUP, true)){
+				ROS_ERROR("Collision during the trajectory processing!");
+				throw runtime_error("Invalid trajectory!");
+			}
+		}
+	}, traj, kt_planning_scene);
 	
 	if (is_interpolated){
 		for (size_t link_idx = 1; link_idx <= 6; link_idx++){
@@ -223,17 +221,15 @@ int main(int argc, char** argv)
 			findLinkDistance(traj, kinematic_state.getLinkModel(link_name), EXPERIMENTAL_DISTANCE_CONSTRAINT, kt_planning_scene);
 		}
 	}
+	collision_check_thread.join();
 	
 	vector<geometry_msgs::Pose> waypoints;
-	robot_trajectory::RobotTrajectory robot_traj(kinematic_model, joint_model_group);
 	for (robot_state::RobotStatePtr state : traj){
 		Eigen::Affine3d pose = state->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 		waypoints.push_back(tf2::toMsg(pose));
-		robot_traj.addSuffixWayPoint(state, 0.2);
 	}
 	
 	visual_tools.loadTrajectoryPub();
-//	visual_tools.publishTrajectoryPath(traj_msg, state_ptr, false);
 	visual_tools.publishPath(waypoints, rvt::GREEN, rvt::SMALL);
 	visual_tools.trigger();
 	
