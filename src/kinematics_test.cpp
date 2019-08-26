@@ -24,6 +24,7 @@
 
 #define STANDARD_INTERPOLATION_STEP 0.01
 #define EXPERIMENTAL_DISTANCE_CONSTRAINT 0.005
+#define EXPERIMENTAL_ATTEMPT_NUMBER 10
 #define FANUC_M20IA_END_EFFECTOR "tool0"
 #define DEFAULT_ROBOT_DESCRIPTION "robot_description"
 #define PLANNING_GROUP "manipulator"
@@ -100,7 +101,8 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 	//Get shape dimensions
 	const shapes::Shape* link_mesh = link->getShapes()[0].get();
 	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
-	
+	//Add here attempt number and increase it every time when translation isn't change
+	size_t attempt = 1;
 	for (list<robot_state::RobotStatePtr>::iterator state_it = trail.begin(); state_it != --trail.end(); ++state_it){
 		
 		list<robot_state::RobotStatePtr>::iterator next_state_it = state_it;
@@ -108,6 +110,7 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 		
 		double translation_distance = getFullTranslation(*state_it, *next_state_it,
 		                                                 link_extends, link->getName());
+		double previous_translation_distance = translation_distance;
 		
 		while (translation_distance > critical_distance){
 			ROS_WARN("%s has to great translation: %f", link->getName().c_str(), translation_distance);
@@ -125,6 +128,18 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 				throw runtime_error("Invalid trajectory!");
 			}
 			
+		}
+		
+		if ((previous_translation_distance / 2) > translation_distance){
+			attempt++;
+		}
+		else{
+			attempt = 1;
+		}
+		
+		if (attempt == EXPERIMENTAL_ATTEMPT_NUMBER){
+			ROS_ERROR("Space jump happened! Truncate trajectory after jump!");
+			throw runtime_error("Invalid trajectory!");
 		}
 		ROS_INFO("%s translate : %f", link->getName().c_str(), translation_distance);
 	}
@@ -186,8 +201,8 @@ int main(int argc, char** argv)
 	
 	const Eigen::Affine3d tool0_frame = kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 	
-	Eigen::Affine3d goal_transform(Eigen::Translation3d(-1, 0.7, 1.5)); //sx -1 sy 1 sz 1,5
-	const Eigen::Affine3d start_pose(Eigen::Translation3d(-1, 0.0, -0.3));
+	Eigen::Affine3d goal_transform(Eigen::Translation3d(-1, 1.2, 1.5)); //sx -1 sy 1 sz 1,5
+	const Eigen::Affine3d start_pose(Eigen::Translation3d(0.3, 0.6, 1.5));
 	kinematic_state.setFromIK(joint_model_group, start_pose);
 	visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
 	
@@ -219,9 +234,9 @@ int main(int argc, char** argv)
 	
 	//Visualize trajectory
 	for (list<robot_state::RobotStatePtr>::iterator it = traj.begin(); it != traj.end(); ++it){
-		this_thread::sleep_for(chrono::milliseconds(20));
+		this_thread::sleep_for(chrono::milliseconds(10));
 		visual_tools.publishRobotState(*it);
-		this_thread::sleep_for(chrono::milliseconds(20));
+		this_thread::sleep_for(chrono::milliseconds(10));
 		visual_tools.deleteAllMarkers();
 	}
 	
