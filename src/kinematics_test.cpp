@@ -25,12 +25,9 @@
 #define STANDARD_INTERPOLATION_STEP 0.01
 #define EXPERIMENTAL_DISTANCE_CONSTRAINT 0.005
 #define EXPERIMENTAL_ATTEMPT_NUMBER 10
-#define FANUC_M20IA_END_EFFECTOR "tool0"
+#define FANUC_M20IA_END_EFFECTOR "link_6"
 #define DEFAULT_ROBOT_DESCRIPTION "robot_description"
 #define PLANNING_GROUP "manipulator"
-
-
-typedef bool (*validateFnc)(robot_state::RobotStatePtr, robot_state::RobotStatePtr, double, double);
 
 using namespace std;
 using namespace moveit;
@@ -95,12 +92,13 @@ double getFullTranslation(const robot_state::RobotStatePtr state, const robot_st
 }
 
 void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
-		const robot_state::LinkModel* link, double critical_distance){
+		const robot_state::LinkModel* link, double critical_distance, planning_scene::PlanningScenePtr current_scene){
 	
 	//Work with the greatest translation of the link
 	//Get shape dimensions
 	const shapes::Shape* link_mesh = link->getShapes()[0].get();
 	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
+	
 	//Add here attempt number and increase it every time when translation isn't change
 	size_t attempt = 1;
 	for (list<robot_state::RobotStatePtr>::iterator state_it = trail.begin(); state_it != --trail.end(); ++state_it){
@@ -108,6 +106,14 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 		list<robot_state::RobotStatePtr>::iterator next_state_it = state_it;
 		next_state_it++;
 		
+		//Checking collision for states
+		if (current_scene->isStateColliding(*state_it->get(), PLANNING_GROUP, true) ||
+				(current_scene->isStateColliding(*next_state_it->get(), PLANNING_GROUP, true))){
+			ROS_ERROR("Collision during the trajectory processing!");
+			throw runtime_error("Invalid trajectory!");
+		}
+		
+		//Remember previous translation distance to find out whether jump happened
 		double translation_distance = getFullTranslation(*state_it, *next_state_it,
 		                                                 link_extends, link->getName());
 		double previous_translation_distance = translation_distance;
@@ -118,7 +124,13 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 			bool is_interpolated = linearInterpolation(segment_to_check, **state_it,
 					(*next_state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
 			if (is_interpolated){
-				trail.insert(next_state_it, *(++segment_to_check.begin()));
+				//Check collision for medium state
+				list<robot_state::RobotStatePtr>::iterator it = ++segment_to_check.begin();
+				if (current_scene->isStateColliding(*it->get(), PLANNING_GROUP, true)){
+					ROS_ERROR("Collision during the trajectory processing!");
+					throw runtime_error("Invalid trajectory!");
+				}
+				trail.insert(next_state_it, *it);
 				next_state_it--;
 				translation_distance = getFullTranslation(*state_it, *next_state_it,
 				                                          link_extends, link->getName());
@@ -130,13 +142,8 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 			
 		}
 		
-		if ((previous_translation_distance / 2) > translation_distance){
-			attempt++;
-		}
-		else{
-			attempt = 1;
-		}
-		
+		((previous_translation_distance / 2) > translation_distance) ? attempt++ : attempt = 1;
+
 		if (attempt == EXPERIMENTAL_ATTEMPT_NUMBER){
 			ROS_ERROR("Space jump happened! Truncate trajectory after jump!");
 			throw runtime_error("Invalid trajectory!");
@@ -155,7 +162,6 @@ int main(int argc, char** argv)
 	spinner.start();
 	
 	moveit::planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
-	moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
 	
 	robot_model_loader::RobotModelLoader kt_robot_model_loader(DEFAULT_ROBOT_DESCRIPTION);
 	robot_model::RobotModelConstPtr kinematic_model = kt_robot_model_loader.getModel();
@@ -177,7 +183,7 @@ int main(int argc, char** argv)
 	visual_tools.publishText(text_pose, "Kinematic_test demo", rvt::WHITE, rvt::XLARGE);
 	visual_tools.trigger();
 
-	visual_tools.prompt("Press next to continue execution...");
+//	visual_tools.prompt("Press next to continue execution...");
 	//end of initialization
 	
 	/** Test trac-ik
@@ -201,9 +207,9 @@ int main(int argc, char** argv)
 	
 	const Eigen::Affine3d tool0_frame = kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 	
-	Eigen::Affine3d goal_transform(Eigen::Translation3d(-1, 1.2, 1.5)); //sx -1 sy 1 sz 1,5
-	const Eigen::Affine3d start_pose(Eigen::Translation3d(0.3, 0.6, 1.5));
-	kinematic_state.setFromIK(joint_model_group, start_pose);
+	Eigen::Affine3d goal_transform(Eigen::Translation3d(1, 0, 0)); //sx -1 sy 1 sz 1,5
+	const Eigen::Affine3d start_pose(Eigen::Translation3d(0.0, 0.0, 0.0));
+	kinematic_state.setFromIK(joint_model_group, tool0_frame * start_pose);
 	visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
 	
 	list<robot_state::RobotStatePtr> traj(0);
@@ -214,7 +220,7 @@ int main(int argc, char** argv)
 	if (is_interpolated){
 		for (size_t link_idx = 1; link_idx <= 6; link_idx++){
 			string link_name = string("link_") + to_string(link_idx);
-			findLinkDistance(traj, kinematic_state.getLinkModel(link_name), EXPERIMENTAL_DISTANCE_CONSTRAINT);
+			findLinkDistance(traj, kinematic_state.getLinkModel(link_name), EXPERIMENTAL_DISTANCE_CONSTRAINT, kt_planning_scene);
 		}
 	}
 	
@@ -225,10 +231,9 @@ int main(int argc, char** argv)
 		waypoints.push_back(tf2::toMsg(pose));
 		robot_traj.addSuffixWayPoint(state, 0.2);
 	}
-	moveit_msgs::RobotTrajectory traj_msg;
-	robot_traj.getRobotTrajectoryMsg(traj_msg);
 	
 	visual_tools.loadTrajectoryPub();
+//	visual_tools.publishTrajectoryPath(traj_msg, state_ptr, false);
 	visual_tools.publishPath(waypoints, rvt::GREEN, rvt::SMALL);
 	visual_tools.trigger();
 	
