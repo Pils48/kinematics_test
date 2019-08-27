@@ -39,7 +39,7 @@ bool linearInterpolation(list<robot_state::RobotStatePtr>& trail,
                          robot_state::RobotState kinematic_state, const Eigen::Affine3d& goal_transform,
                          size_t translation_steps, bool global_reference_frame = true){
 	
-	const robot_state::JointModelGroup* jmg = kinematic_state.getJointModelGroup(PLANNING_GROUP);
+	const robot_state::JointModelGroup* jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
 	trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
 	const moveit::core::LinkModel* ptr_link_model = kinematic_state.getLinkModel(FANUC_M20IA_END_EFFECTOR);
 	
@@ -61,7 +61,7 @@ bool linearInterpolation(list<robot_state::RobotStatePtr>& trail,
 		
 		pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
 		
-		if (kinematic_state.setFromIK(jmg, pose, ptr_link_model->getName()))
+		if (kinematic_state.setFromIK(jmg_ptr, pose, ptr_link_model->getName()))
 			trail.push_back(robot_state::RobotStatePtr(new robot_state::RobotState(kinematic_state)));
 		else{
 			ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
@@ -96,10 +96,9 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 	
 	//Work with the greatest translation of the link
 	//Get shape dimensions
-	const shapes::Shape* link_mesh = link->getShapes()[0].get();
-	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh);
+	const shapes::Shape* link_mesh_ptr = link->getShapes()[0].get();
+	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
 	
-	//Add here attempt number and increase it every time when translation isn't change
 	size_t attempt = 1;
 	for (list<robot_state::RobotStatePtr>::iterator state_it = trail.begin(); state_it != --trail.end(); ++state_it){
 		
@@ -124,7 +123,7 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 				                                          link_extends, link->getName());
 			}
 			else {
-				ROS_ERROR("Space jump happened! Truncate trajectory after jump!");
+				ROS_ERROR("Space jump happened!");
 				throw runtime_error("Invalid trajectory!");
 			}
 			
@@ -133,12 +132,22 @@ void findLinkDistance(list<robot_state::RobotStatePtr>& trail,
 		((previous_translation_distance / 2) > translation_distance) ? attempt++ : attempt = 1;
 
 		if (attempt == EXPERIMENTAL_ATTEMPT_NUMBER){
-			ROS_ERROR("Space jump happened! Truncate trajectory after jump!");
+			ROS_ERROR("Space jump happened!");
 			throw runtime_error("Invalid trajectory!");
 		}
 		ROS_INFO("%s translate : %f", link->getName().c_str(), translation_distance);
 	}
 	
+}
+
+void check_collision(list<robot_state::RobotStatePtr> traj,
+                     planning_scene::PlanningScenePtr current_scene){
+	for (robot_state::RobotStatePtr state : traj){
+		if (current_scene->isStateColliding(*state, PLANNING_GROUP, true)){
+			ROS_ERROR("Collision during the trajectory processing!");
+			throw runtime_error("Invalid trajectory!");
+		}
+	}
 }
 
 int main(int argc, char** argv)
@@ -152,14 +161,14 @@ int main(int argc, char** argv)
 	moveit::planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
 	
 	robot_model_loader::RobotModelLoader kt_robot_model_loader(DEFAULT_ROBOT_DESCRIPTION);
-	robot_model::RobotModelConstPtr kinematic_model = kt_robot_model_loader.getModel();
+	robot_model::RobotModelConstPtr kt_kinematic_model = kt_robot_model_loader.getModel();
 	planning_scene_monitor::PlanningSceneMonitor kt_planning_scene_monitor(DEFAULT_ROBOT_DESCRIPTION);
 	planning_scene::PlanningScenePtr kt_planning_scene = kt_planning_scene_monitor.getPlanningScene();
-	robot_state::RobotState kinematic_state(kinematic_model);
-	ROS_INFO("Model frame: %s", kinematic_model->getModelFrame().c_str());
+	robot_state::RobotState kt_kinematic_state(kt_kinematic_model);
+	ROS_INFO("Model frame: %s", kt_kinematic_model->getModelFrame().c_str());
 	
-	kinematic_state.setToDefaultValues();
-	const robot_state::JointModelGroup* joint_model_group = kinematic_model->getJointModelGroup(PLANNING_GROUP);
+	kt_kinematic_state.setToDefaultValues();
+	const robot_state::JointModelGroup* joint_model_group_ptr = kt_kinematic_model->getJointModelGroup(PLANNING_GROUP);
 	
 	moveit_visual_tools::MoveItVisualTools visual_tools("base_link");
 	namespace rvt = rviz_visual_tools;
@@ -175,70 +184,59 @@ int main(int argc, char** argv)
 	//end of initialization
 	
 	/** Test trac-ik
-	kinematic_state.setToRandomPositions(joint_model_group);
-	const Eigen::Affine3d& end_effector_state = kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
+	kt_kinematic_state.setToRandomPositions(joint_model_group_ptr);
+	const Eigen::Affine3d& end_effector_state = kt_kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 
 	//Visualization
-	visual_tools.publishRobotState(kinematic_state, rvt::colors::DARK_GREY);
+	visual_tools.publishRobotState(kt_kinematic_state, rvt::colors::DARK_GREY);
 	visual_tools.prompt("Press next to continue execution...");
 
 	vector<double> joint_values;
 	double timeout = 0.1;
-	bool found_ik = kinematic_state.setFromIK(joint_model_group, end_effector_state, timeout);
+	bool found_ik = kt_kinematic_state.setFromIK(joint_model_group_ptr, end_effector_state, timeout);
 
 	if(found_ik){
-		visual_tools.publishRobotState(kinematic_state, rvt::colors::BLUE);
+		visual_tools.publishRobotState(kt_kinematic_state, rvt::colors::BLUE);
 	}
 	visual_tools.prompt("Press next to continue execution...");
 
-	kinematic_state.setToDefaultValues(); */
+	kt_kinematic_state.setToDefaultValues(); */
 	
-	const Eigen::Affine3d tool0_frame = kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
+	const Eigen::Affine3d end_effector_frame = kt_kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
+	const Eigen::Affine3d goal_transform(Eigen::Translation3d(-0.4, 0, -0.5));
+	const Eigen::Affine3d start_transform(Eigen::Translation3d(0.0, 0.0, 0.0));
+	kt_kinematic_state.setFromIK(joint_model_group_ptr, end_effector_frame * start_transform);
+	visual_tools.publishRobotState(kt_kinematic_state, rvt::BLUE);
 	
-	Eigen::Affine3d goal_transform(Eigen::Translation3d(-0.2, 0, 0.5));
-	const Eigen::Affine3d start_pose(Eigen::Translation3d(0.0, 0.0, 0.0));
-	kinematic_state.setFromIK(joint_model_group, tool0_frame * start_pose);
-	visual_tools.publishRobotState(kinematic_state, rvt::BLUE);
-	
-	list<robot_state::RobotStatePtr> traj(0);
-	size_t approximate_steps = floor((goal_transform.translation() - start_pose.translation()).norm() /
-	                                 STANDARD_INTERPOLATION_STEP);
-	bool is_interpolated = linearInterpolation(traj, kinematic_state, goal_transform, approximate_steps, false);
-	
-	thread collision_check_thread([](list<robot_state::RobotStatePtr> traj,
-	                                 planning_scene::PlanningScenePtr current_scene){
-		for (robot_state::RobotStatePtr state : traj){
-			if (current_scene->isStateColliding(*state, PLANNING_GROUP, true)){
-				ROS_ERROR("Collision during the trajectory processing!");
-				throw runtime_error("Invalid trajectory!");
-			}
-		}
-	}, traj, kt_planning_scene);
+	list<robot_state::RobotStatePtr> trajectory(0);
+	size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
+			STANDARD_INTERPOLATION_STEP);
+	bool is_interpolated = linearInterpolation(trajectory, kt_kinematic_state, goal_transform, approximate_steps, false);
 	
 	if (is_interpolated){
-		for (size_t link_idx = 1; link_idx <= 6; link_idx++){
+		//Don't process base_link
+		for (size_t link_idx = 1; link_idx <= kt_kinematic_model->getLinkGeometryCount() - 1; link_idx++){
+			thread check_collision_thread(check_collision, trajectory, kt_planning_scene);
 			string link_name = string("link_") + to_string(link_idx);
-			findLinkDistance(traj, kinematic_state.getLinkModel(link_name), EXPERIMENTAL_DISTANCE_CONSTRAINT, kt_planning_scene);
+			findLinkDistance(trajectory, kt_kinematic_state.getLinkModel(link_name), EXPERIMENTAL_DISTANCE_CONSTRAINT, kt_planning_scene);
+			check_collision_thread.join();
 		}
 	}
-	collision_check_thread.join();
 	
+	//Construct and publish trajectory line
 	vector<geometry_msgs::Pose> waypoints;
-	for (robot_state::RobotStatePtr state : traj){
+	for (robot_state::RobotStatePtr state : trajectory){
 		Eigen::Affine3d pose = state->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
 		waypoints.push_back(tf2::toMsg(pose));
 	}
-	
-	visual_tools.loadTrajectoryPub();
 	visual_tools.publishPath(waypoints, rvt::GREEN, rvt::SMALL);
 	visual_tools.trigger();
 	
 	//Visualize trajectory
-	for (list<robot_state::RobotStatePtr>::iterator it = traj.begin(); it != traj.end(); ++it){
+	for (list<robot_state::RobotStatePtr>::iterator it = trajectory.begin(); it != trajectory.end(); ++it){
 		this_thread::sleep_for(chrono::milliseconds(10));
 		visual_tools.publishRobotState(*it);
 		this_thread::sleep_for(chrono::milliseconds(10));
 		visual_tools.deleteAllMarkers();
 	}
-	
 }
