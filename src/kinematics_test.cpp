@@ -6,21 +6,18 @@
 
 #include <ros/ros.h>
 
-#include <vector>
 #include <list>
 #include <chrono>
 #include <thread>
 
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
-#include <tf2_eigen/tf2_eigen.h>
 #include <tf_conversions/tf_eigen.h>
 
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_model/robot_model.h>
 #include <moveit/robot_state/robot_state.h>
-#include <moveit_msgs/CollisionObject.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
 #define FANUC_M20IA_END_EFFECTOR "tool0"
@@ -31,6 +28,7 @@ using namespace std;
 using namespace moveit;
 using namespace core;
 using namespace robot_state;
+using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
@@ -47,28 +45,28 @@ bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
 
 /** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
  * for translation parameter. Return true in case of success. Trail assumed to be empty*/
-bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state, const Eigen::Affine3d& goal_transform,
+bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
         size_t translation_steps, bool global_reference_frame = true)
 {
-    const JointModelGroup *jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
+    auto *jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
     auto inserter = back_inserter(trail);
     inserter = RobotStatePtr(new RobotState(kinematic_state));
-    const moveit::core::LinkModel *ptr_link_model = kinematic_state.getLinkModel(FANUC_M20IA_END_EFFECTOR);
+    auto *ptr_link_model = kinematic_state.getLinkModel(FANUC_M20IA_END_EFFECTOR);
 
-    Eigen::Affine3d start_pose = kinematic_state.getGlobalLinkTransform(ptr_link_model);
+    Affine3d start_pose = kinematic_state.getGlobalLinkTransform(ptr_link_model);
 
     // the target can be in the local reference frame (in which case we rotate it)
-    Eigen::Affine3d rotated_target = global_reference_frame ? goal_transform : start_pose * goal_transform;
+    Affine3d rotated_target = global_reference_frame ? goal_transform : start_pose * goal_transform;
 
-    Eigen::Quaterniond start_quaternion(start_pose.rotation());
-    Eigen::Quaterniond target_quaternion(rotated_target.rotation());
+    Quaterniond start_quaternion(start_pose.rotation());
+    Quaterniond target_quaternion(rotated_target.rotation());
 
     size_t steps = translation_steps + 1;
 
     for (size_t i = 1; i <= steps; ++i) {
         double percentage = (double) i / (double) steps;
 
-        Eigen::Affine3d pose(start_quaternion.slerp(percentage, target_quaternion));
+        Affine3d pose(start_quaternion.slerp(percentage, target_quaternion));
 
         pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
 
@@ -94,19 +92,18 @@ RobotStatePtr getMiddleState(RobotState state, RobotState next_state)
 double getFullTranslation(const RobotStatePtr state, const RobotStatePtr next_state, string link_name)
 {
 	auto link_mesh_ptr = state->getLinkModel(link_name)->getShapes()[0].get();
-	Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
-	
-	const Eigen::Affine3d state_transform = state->getGlobalLinkTransform(link_name);
-	const Eigen::Affine3d next_state_transform = next_state->getGlobalLinkTransform(link_name);
-	Eigen::Quaterniond start_quaternion(state_transform.rotation());
-	Eigen::Quaterniond target_quaternion(next_state_transform.rotation());
-	
-	//Чекать все точки бокса на удаленность от ориджина и смотреть октанты
+	Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+
+	const Affine3d state_transform = state->getGlobalLinkTransform(link_name);
+	const Affine3d next_state_transform = next_state->getGlobalLinkTransform(link_name);
+	Quaterniond start_quaternion(state_transform.rotation());
+	Quaterniond target_quaternion(next_state_transform.rotation());
+
 	double sin_between_quaternions = sin(start_quaternion.angularDistance(target_quaternion));
 	double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
-	
+
 	double linear_angular_distance = (state_transform.translation().norm() + diagonal_length) * sin_between_quaternions;
-	
+
 	return (state_transform.translation() - next_state_transform.translation()).norm() + linear_angular_distance;
 }
 
@@ -128,11 +125,11 @@ void checkAllowedCollision(RobotState& state, planning_scene::PlanningScenePtr c
 	collision_detection::CollisionResult res;
 	current_scene->checkCollision(req, res, state);
 	auto contact_map = res.contacts;
-	
+
 	if (res.collision == false && contact_map.empty())
 		return;
 	auto contact_vector = contact_map.begin()->second;
-	
+
 	//Here we are sure that in initial and final state we dont have more than one contact
 	if ((contact_map.size() == 1) && (contact_vector.size() == 1)) {
 			double contact_depth = contact_vector[0].depth;
@@ -168,21 +165,17 @@ void checkJump(list<RobotStatePtr> trajectory)
 void splitTrajectorySegment(list<RobotStatePtr>& trail, double critical_distance)
 {
 	for (auto state_it = trail.begin(); state_it != prev(trail.end()); ++state_it){
-		pair<string, double> translation_pair = getMaxTranslation(*state_it, *next(state_it));
-		
-		while (translation_pair.second > critical_distance){
-			ROS_WARN("%s has to great translation: %f", translation_pair.first.c_str(),
-			         translation_pair.second);
-			auto mid_state = getMiddleState(**state_it, **next(state_it));
-			if (mid_state){
-				auto insert_it = inserter(trail, next(state_it));
-				insert_it = mid_state;
-				translation_pair.second = getFullTranslation(*state_it, *next(state_it), translation_pair.first);
-			}
-			else
-				throw runtime_error("Space jump happened!\nInvalid trajectory!");
-		}
-		ROS_INFO("%s translate : %f", translation_pair.first.c_str(), translation_pair.second);
+		auto translation_pair = getMaxTranslation(*state_it, *next(state_it));
+
+		while (translation_pair.second > critical_distance) {
+            auto mid_state = getMiddleState(**state_it, **next(state_it));
+            if (mid_state) {
+                auto insert_it = inserter(trail, next(state_it));
+                insert_it = mid_state;
+                translation_pair.second = getFullTranslation(*state_it, *next(state_it), translation_pair.first);
+            } else
+                throw runtime_error("Space jump happened!\nInvalid trajectory!");
+        }
 	}
 }
 
@@ -201,72 +194,48 @@ int main(int argc, char** argv)
 	ros::NodeHandle node_handle;
 	ros::AsyncSpinner spinner(1);
 	spinner.start();
-	
+
 	moveit::planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
-	
+
 	robot_model_loader::RobotModelLoader kt_robot_model_loader(DEFAULT_ROBOT_DESCRIPTION);
 	robot_model::RobotModelConstPtr kt_kinematic_model = kt_robot_model_loader.getModel();
 	planning_scene_monitor::PlanningSceneMonitor kt_planning_scene_monitor(DEFAULT_ROBOT_DESCRIPTION);
 	planning_scene::PlanningScenePtr kt_planning_scene = kt_planning_scene_monitor.getPlanningScene();
 	RobotState kt_kinematic_state(kt_kinematic_model);
 	ROS_INFO("Model frame: %s", kt_kinematic_model->getModelFrame().c_str());
-	
+
 	kt_kinematic_state.setToDefaultValues();
 	const JointModelGroup* joint_model_group_ptr = kt_kinematic_model->getJointModelGroup(PLANNING_GROUP);
-	
+
 	moveit_visual_tools::MoveItVisualTools visual_tools(kt_kinematic_model->getModelFrame());
 	namespace rvt = rviz_visual_tools;
 	visual_tools.deleteAllMarkers();
 	visual_tools.loadRemoteControl();
-	
-	Eigen::Affine3d text_pose = Eigen::Affine3d::Identity();
-	text_pose.translation().z() = 1.75;
-	visual_tools.publishText(text_pose, "Kinematic_test demo", rvt::WHITE, rvt::XLARGE);
-	visual_tools.trigger();
 	//end of initialization
-	
+
 	tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
 	tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI * 0.6, 0), tf::Vector3(1.085, 0.0, 1.565));
-	const Eigen::Affine3d end_effector_frame = kt_kinematic_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
-	Eigen::Affine3d goal_transform;
-	Eigen::Affine3d start_transform;
-	
+	Affine3d goal_transform;
+	Affine3d start_transform;
+
 	tf::transformTFToEigen(tf_start, start_transform);
 	tf::transformTFToEigen(tf_goal, goal_transform);
+
 	//Check first and last state on allowed collision
 	kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-    visual_tools.publishRobotState(kt_kinematic_state, rvt::BLUE);
 	checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 	kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
 	checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
-	visual_tools.publishRobotState(kt_kinematic_state, rvt::BLUE);
-	
+
 	list<RobotStatePtr> trajectory;
 	size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
 			STANDARD_INTERPOLATION_STEP);
 	bool is_interpolated = linearInterpolation(trajectory, kt_kinematic_state, goal_transform, approximate_steps);
-	
+
 	if (is_interpolated){
 		thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
         checkJump(trajectory);
         splitTrajectorySegment(trajectory, EXPERIMENTAL_DISTANCE_CONSTRAINT);
 		check_collision_thread.join();
-	}
-	
-	//Construct and publish trajectory line
-	vector<geometry_msgs::Pose> waypoints;
-	for (RobotStatePtr state : trajectory){
-		Eigen::Affine3d pose = state->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR);
-		waypoints.push_back(tf2::toMsg(pose));
-	}
-	visual_tools.publishPath(waypoints, rvt::GREEN, rvt::SMALL);
-	visual_tools.trigger();
-	
-	//Visualize trajectory
-	for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
-		this_thread::sleep_for(chrono::milliseconds(10));
-		visual_tools.publishRobotState(*it);
-		this_thread::sleep_for(chrono::milliseconds(10));
-		visual_tools.deleteAllMarkers();
 	}
 }
