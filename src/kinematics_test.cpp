@@ -20,6 +20,7 @@
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
+
 #define FANUC_M20IA_END_EFFECTOR "tool0"
 #define DEFAULT_ROBOT_DESCRIPTION "robot_description"
 #define PLANNING_GROUP "manipulator"
@@ -37,16 +38,47 @@ static const double STANDARD_INTERPOLATION_STEP = 0.01;
 static const double EXPERIMENTAL_DISTANCE_CONSTRAINT = 0.005;
 
 
+struct LinearParams{
+    const planning_scene::PlanningScene *scene;
+    const moveit::core::JointModelGroup *group;
+    const moveit::core::LinkModel *end_effector;
+    const tf::Transform &ee_offset;
+};
+
 bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
                 const double* joint_group_variable_values)
 {
     return robot_state->satisfiesBounds(joint_group);
 }
 
+
+template <typename Interpolator, typename IKSolver, typename OutputIterator>
+bool linearInterpolation(list<RobotStatePtr>& trail, LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
+                         IKSolver&& solver, size_t steps, OutputIterator out)
+{
+    RobotState current(base_state);
+    *out++ = current;
+    tf::Transform pose;
+    for (size_t i = 1; i <= steps; ++i) {
+        double  percentage = i / steps;
+        interpolator.interpolateByPercentage(percentage, pose, current);
+        if (interpolator.totolDistance() > DISTANCE_TOLERANCE){
+            bool ok = solver.setStateFromIK(params, pose, current);
+            if (ok)
+                *out++ = current;
+            return ok;
+        }
+        if (!solver.setStateFromIK(params, pose, current)){
+            throw runtime_error("Error during interpolation!");
+        }
+        *out++ = current;
+    }
+}
+
 /** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
  * for translation parameter. Return true in case of success. Trail assumed to be empty*/
-bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
-                         size_t translation_steps, bool global_reference_frame = true)
+bool interpolate(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
+        size_t translation_steps, bool global_reference_frame = true)
 {
     auto *jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
     auto inserter = back_inserter(trail);
@@ -66,12 +98,11 @@ bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state,
     for (size_t i = 1; i <= steps; ++i) {
         double percentage = (double) i / (double) steps;
 
-        Affine3d pose(start_quaternion.slerp(percentage, target_quaternion));
+        Isometry3d pose(start_quaternion.slerp(percentage, target_quaternion));
 
         pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
 
-        if (kinematic_state.setFromIK(jmg_ptr, pose, ptr_link_model->getName(),
-                                      validateIK(&kinematic_state, jmg_ptr, kinematic_state.getVariablePositions())))
+        if (kinematic_state.setFromIK(jmg_ptr, pose))
             inserter = RobotStatePtr(new RobotState(kinematic_state));
         else {
             ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
@@ -85,7 +116,7 @@ bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state,
 RobotStatePtr getMiddleState(RobotState state, RobotState next_state)
 {
     list<RobotStatePtr> segment_to_check;
-    auto is_interpolated = linearInterpolation(segment_to_check, state, next_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
+    auto is_interpolated = interpolate(segment_to_check, state, next_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
     return is_interpolated ? *next(segment_to_check.begin()) : nullptr;
 }
 
@@ -214,8 +245,8 @@ int main(int argc, char** argv)
 
     tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
     tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI * 0.6, 0), tf::Vector3(1.085, 0.0, 1.565));
-    Affine3d goal_transform;
-    Affine3d start_transform;
+    Isometry3d goal_transform;
+    Isometry3d start_transform;
 
     tf::transformTFToEigen(tf_start, start_transform);
     tf::transformTFToEigen(tf_goal, goal_transform);
@@ -229,7 +260,7 @@ int main(int argc, char** argv)
     list<RobotStatePtr> trajectory;
     size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
                                      STANDARD_INTERPOLATION_STEP);
-    bool is_interpolated = linearInterpolation(trajectory, kt_kinematic_state, goal_transform, approximate_steps);
+    bool is_interpolated = interpolate(trajectory, kt_kinematic_state, goal_transform, approximate_steps);
 
     if (is_interpolated){
         thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
