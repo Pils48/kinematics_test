@@ -53,28 +53,28 @@ bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
 
 
 template <typename Interpolator, typename IKSolver, typename OutputIterator>
-bool linearInterpolation(list<RobotStatePtr>& trail, LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
+bool linearInterpolation(const LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
                          IKSolver&& solver, size_t steps, OutputIterator out)
 {
     RobotState current(base_state);
     *out++ = current;
     tf::Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
-        double  percentage = i / steps;
+        double percentage = i / steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
-        if (interpolator.totolDistance() > DISTANCE_TOLERANCE){
-            bool ok = solver.setStateFromIK(params, pose, current);
-            if (ok)
-                *out++ = current;
-            return ok;
-        }
-        if (!solver.setStateFromIK(params, pose, current)){
-            throw runtime_error("Error during interpolation!");
-        }
+        if (!solver.setStateFromIK(params, pose, current))
+            return false;
         *out++ = current;
+        return true;
     }
 }
 
+template <typename OutputIterator, typename Interpolator, typename IKSolver>
+void splitTrajectory(OutputIterator out, Interpolator&& interpolator, const LinearParams& params,
+        IKSolver solver)
+{
+
+}
 /** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
  * for translation parameter. Return true in case of success. Trail assumed to be empty*/
 bool interpolate(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
