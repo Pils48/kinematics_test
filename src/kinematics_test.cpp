@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 
+#include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
 #include <tf_conversions/tf_eigen.h>
@@ -33,9 +34,11 @@ using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
+static const double DISTANCE_CONTINUITY_PRECISION = 0.00001;
+static const double ANGLE_CONTINUITY_PRECISION = angles::from_degrees(0.005);
+static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double DISTANCE_TOLERANCE = 0.00015;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
-static const double EXPERIMENTAL_DISTANCE_CONSTRAINT = 0.005;
 
 
 struct LinearParams{
@@ -45,6 +48,31 @@ struct LinearParams{
     const tf::Transform &ee_offset;
 };
 
+double getFullTranslation(const RobotState& state, const RobotState& next_state, string link_name)
+{
+    auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
+    Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+
+    const Affine3d state_transform = state.getGlobalLinkTransform(link_name);
+    const Affine3d next_state_transform = next_state.getGlobalLinkTransform(link_name);
+    Quaterniond start_quaternion(state_transform.rotation());
+    Quaterniond target_quaternion(next_state_transform.rotation());
+
+    double sin_between_quaternions = sin(start_quaternion.angularDistance(target_quaternion));
+    double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
+
+    double linear_angular_distance = (state_transform.translation().norm() + diagonal_length) * sin_between_quaternions;
+
+    return (state_transform.translation() - next_state_transform.translation()).norm() + linear_angular_distance;
+}
+
+double getMaxTranslation(const RobotState& state, const RobotState& next_state){
+    double max_dist = 0;
+    for (auto link : state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
+        max_dist = max(max_dist, getFullTranslation(state, next_state, link->getName()));
+    return max_dist;
+}
+
 bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
                 const double* joint_group_variable_values)
 {
@@ -53,7 +81,7 @@ bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
 
 
 template <typename Interpolator, typename IKSolver, typename OutputIterator>
-bool linearInterpolation(const LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
+bool linearInterpolationTemplate(const LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
                          IKSolver&& solver, size_t steps, OutputIterator out)
 {
     RobotState current(base_state);
@@ -70,11 +98,39 @@ bool linearInterpolation(const LinearParams& params, const RobotState& base_stat
 }
 
 template <typename OutputIterator, typename Interpolator, typename IKSolver>
-void splitTrajectory(OutputIterator out, Interpolator&& interpolator, const LinearParams& params,
-        IKSolver solver)
+void splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
+        RobotState& state, RobotState& next_state)
 {
-
+    tf::Transform pose;
+    RobotState current(state);
+    while (getMaxTranslation(state, next_state) > LINEAR_TARGET_PRECISION){
+        interpolator.interpolateByPercentage(0.5, pose, current);
+        if (!solver.setStateFromIK(params, pose, current))
+            throw runtime_error("Invalid trajectory!");
+        *out++ = current;
+    }
 }
+
+template <typename Interpolator, typename IKSolver>
+void checkJumpTemplate(const LinearParams& params, Interpolator&& interpolator, IKSolver&& solver, RobotState state, RobotState next_state)
+{
+    tf::Transform pose;
+    RobotState current(state);
+    auto dist = state.distance(next_state);
+    double percentage = 1;
+    while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD){
+        percentage *= 0.5;
+        interpolator.interpolateByPecentage(percentage, pose, current);
+        if (!solver.setStateFromIK(params, pose, current))
+            throw runtime_error("Invalid trajectory!");
+        auto lm = state.distance(current);
+        auto mr = current.distance(next_state);
+        dist = lm < mr ? current.distance(state) : state.distance(current);
+    }
+    if (percentage < 0.00005)
+        throw runtime_error("Invalid trajectory!");
+}
+
 /** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
  * for translation parameter. Return true in case of success. Trail assumed to be empty*/
 bool interpolate(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
@@ -265,7 +321,7 @@ int main(int argc, char** argv)
     if (is_interpolated){
         thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
         checkJump(trajectory);
-        splitTrajectorySegment(trajectory, EXPERIMENTAL_DISTANCE_CONSTRAINT);
+        splitTrajectorySegment(trajectory, LINEAR_TARGET_PRECISION);
         check_collision_thread.join();
     }
 }
