@@ -3,7 +3,6 @@
  * using trac-ik as a kinematic solver.
  *********************************************************************/
 
-
 #include <ros/ros.h>
 
 #include <list>
@@ -29,7 +28,6 @@
 using namespace std;
 using namespace moveit;
 using namespace core;
-using namespace robot_state;
 using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
@@ -40,23 +38,149 @@ static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double DISTANCE_TOLERANCE = 0.00015;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
+
+class TransformSlerper
+{
+public:
+    TransformSlerper(const tf::Transform &source, const tf::Transform &target)
+            : source(source)
+            , target(target)
+            , source_rotation(source.getRotation())
+            , target_rotation(target.getRotation())
+            , total_distance(target.getOrigin().distance(source.getOrigin()))
+            , total_angle(source_rotation.angleShortestPath(target_rotation))
+    {}
+
+    tf::Transform slerpByPercentage(double percentage) const
+    {
+        return tf::Transform(
+                source_rotation.slerp(target_rotation, percentage),
+                percentage * target.getOrigin() + (1 - percentage) * source.getOrigin()
+        );
+    }
+
+    tf::Transform slerpByDistance(double distance) const
+    {
+        if (total_distance < std::numeric_limits<double>::epsilon())
+            return source;
+        return slerpByPercentage(distance / total_distance);
+    }
+
+    tf::Transform slerpByAngle(double angle) const
+    {
+        if (total_angle < std::numeric_limits<double>::epsilon())
+            return source;
+        return slerpByPercentage(angle / total_angle);
+    }
+
+    double totalDistance() const
+    {
+        return total_distance;
+    }
+
+    double totalAngle() const
+    {
+        return total_angle;
+    }
+
+private:
+    const tf::Transform &source;
+    const tf::Transform &target;
+    tf::Quaternion source_rotation, target_rotation;
+    double total_distance;
+    double total_angle;
+};
+
+class PoseAndStateInterpolator
+{
+public:
+    PoseAndStateInterpolator(
+            const tf::Transform &source,
+            const tf::Transform &target,
+            const RobotState &start_state,
+            const RobotState &end_state
+            ) : _slerper(source, target)
+            , _start_state(start_state)
+            , _end_state(end_state)
+    {
+    }
+
+    PoseAndStateInterpolator(
+            const Isometry3d& source,
+            const Isometry3d& target,
+            const RobotState& start_state,
+            const RobotState& end_state
+            ) : _start_state(start_state)
+            , _end_state(end_state)
+            , _slerper(paramToTF(source), paramToTF(target))
+    {
+    }
+
+    tf::Transform paramToTF(const Isometry3d& source){
+        tf::Transform res_pose;
+        tf::poseEigenToTF(source, res_pose);
+        return res_pose;
+    }
+
+    void interpolateByPercentage(double percentage, tf::Transform &pose, RobotState &state)
+    {
+        pose = _slerper.slerpByPercentage(percentage);
+        state.update();
+    }
+
+    void interpolateByDistance(double distance, tf::Transform &pose, RobotState &state) const
+    {
+        pose = _slerper.slerpByDistance(distance);
+        _start_state.interpolate(_end_state, distance / totalDistance(), state);
+        state.update();
+    }
+
+    void interpolateByAngle(double angle, tf::Transform &pose, RobotState &state) const
+    {
+        pose = _slerper.slerpByAngle(angle);
+        _start_state.interpolate(_end_state, angle / totalAngle(), state);
+        state.update();
+    }
+
+    double totalDistance() const
+    {
+        return _slerper.totalDistance();
+    }
+
+    double totalAngle() const
+    {
+        return _slerper.totalAngle();
+    }
+
+private:
+    TransformSlerper _slerper;
+    const RobotState &_start_state;
+    const RobotState &_end_state;
+};
+
 struct LinearParams{
-    const planning_scene::PlanningScene* scene;
     const JointModelGroup* group;
     const LinkModel* end_effector;
-    const tf::Transform& ee_offset;
     const double interpolation_step;
 };
 
-RobotStatePtr getMiddleState(RobotState state, RobotState next_state);
+class TestIKSolver{
+public:
+    bool setStateFromIK(const LinearParams& params, tf::Transform& pose, RobotState& state)
+    {
+        Isometry3d eigen_pose;
+        tf::poseTFToEigen(pose, eigen_pose);
+        return state.setFromIK(params.group, eigen_pose);
+    }
+};
 
-double getFullTranslation(const RobotState& state, const RobotState& next_state, string link_name)
+double getFullTranslation(RobotState& state, RobotState& next_state, string link_name)
 {
     auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
     Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
 
-    const Affine3d state_transform = state.getGlobalLinkTransform(link_name);
-    const Affine3d next_state_transform = next_state.getGlobalLinkTransform(link_name);
+    auto state_transform = state.getGlobalLinkTransform(link_name);
+    auto next_state_transform = next_state.getGlobalLinkTransform(link_name);
     Quaterniond start_quaternion(state_transform.rotation());
     Quaterniond target_quaternion(next_state_transform.rotation());
 
@@ -68,19 +192,12 @@ double getFullTranslation(const RobotState& state, const RobotState& next_state,
     return (state_transform.translation() - next_state_transform.translation()).norm() + linear_angular_distance;
 }
 
-double getMaxTranslation(const RobotState& state, const RobotState& next_state){
+double getMaxTranslation(RobotState& state, RobotState& next_state){
     double max_dist = 0;
     for (auto link : state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
         max_dist = max(max_dist, getFullTranslation(state, next_state, link->getName()));
     return max_dist;
 }
-
-bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
-                const double* joint_group_variable_values)
-{
-    return robot_state->satisfiesBounds(joint_group);
-}
-
 
 template <typename Interpolator, typename IKSolver, typename OutputIterator>
 bool linearInterpolationTemplate(const LinearParams& params, const RobotState& base_state, Interpolator&& interpolator,
@@ -90,27 +207,33 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
     *out++ = current;
     tf::Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
-        double percentage = i / steps;
+        double percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
         if (!solver.setStateFromIK(params, pose, current))
             return false;
         *out++ = current;
-        return true;
     }
+    return true;
 }
 
 template <typename OutputIterator, typename Interpolator, typename IKSolver>
 void splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
-        const RobotState& state, const RobotState& next_state)
+        RobotState& state, RobotState& next_state)
 {
     tf::Transform pose;
     RobotState current(state);
-    while (getMaxTranslation(state, next_state) > LINEAR_TARGET_PRECISION){
+    list<RobotState> buffer;
+    double translation = getMaxTranslation(state, next_state);
+    while (translation > LINEAR_TARGET_PRECISION){
+        ROS_WARN("Too great translation: %f", translation);
         interpolator.interpolateByDistance(params.interpolation_step / 2, pose, current);
         if (!solver.setStateFromIK(params, pose, current))
             throw runtime_error("Invalid trajectory!");
-        *out++ = current;
+        translation = getMaxTranslation(state, current);
+        buffer.push_back(current);
     }
+    for (auto elem : buffer)
+        *out++ = elem;
 }
 
 template <typename Interpolator, typename IKSolver>
@@ -247,7 +370,6 @@ void checkJump(list<RobotStatePtr> trajectory)
     }
 }
 
-
 void splitTrajectorySegment(list<RobotStatePtr>& trail, double critical_distance)
 {
     for (auto state_it = trail.begin(); state_it != prev(trail.end()); ++state_it){
@@ -281,7 +403,7 @@ int main(int argc, char** argv)
     ros::AsyncSpinner spinner(1);
     spinner.start();
 
-    moveit::planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
+    planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
 
     robot_model_loader::RobotModelLoader kt_robot_model_loader(DEFAULT_ROBOT_DESCRIPTION);
     robot_model::RobotModelConstPtr kt_kinematic_model = kt_robot_model_loader.getModel();
@@ -300,7 +422,7 @@ int main(int argc, char** argv)
     //end of initialization
 
     tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI * 0.6, 0), tf::Vector3(1.085, 0.0, 1.565));
+    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 1.0, 1.565));
     Isometry3d goal_transform;
     Isometry3d start_transform;
 
@@ -313,15 +435,33 @@ int main(int argc, char** argv)
     kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
     checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 
-    list<RobotStatePtr> trajectory;
+    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
+    RobotState goal_state(kt_kinematic_state);
+    kt_kinematic_state.setFromIK(joint_model_group_ptr,start_transform);
+    RobotState start_state(kt_kinematic_state);
+
+    list<RobotState> trajectory;
+    auto out = back_inserter(trajectory);
+    LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), STANDARD_INTERPOLATION_STEP};
+    TestIKSolver solver;
     size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
                                      STANDARD_INTERPOLATION_STEP);
-    bool is_interpolated = interpolate(trajectory, kt_kinematic_state, goal_transform, approximate_steps);
+    PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
+    linearInterpolationTemplate(params, kt_kinematic_state, interpolator, solver, approximate_steps, out);
+    for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it)
+        splitTrajectoryTemplate(out, interpolator, solver, params, *state_it, *next(state_it));
 
-    if (is_interpolated){
-        thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
-        checkJump(trajectory);
-        splitTrajectorySegment(trajectory, LINEAR_TARGET_PRECISION);
-        check_collision_thread.join();
+//
+//    if (is_interpolated){
+//        thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
+//        checkJump(trajectory);
+//        splitTrajectorySegment(trajectory, LINEAR_TARGET_PRECISION);
+//        check_collision_thread.join();
+//    }
+    for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
+        this_thread::sleep_for(chrono::milliseconds(10));
+        visual_tools.publishRobotState(*it);
+        this_thread::sleep_for(chrono::milliseconds(10));
+        visual_tools.deleteAllMarkers();
     }
 }
