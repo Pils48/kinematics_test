@@ -8,6 +8,7 @@
 #include <list>
 #include <chrono>
 #include <thread>
+#include <iterator>
 
 #include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
@@ -217,20 +218,59 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
 }
 
 template <typename OutputIterator, typename Interpolator, typename IKSolver>
-void splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, double& valid_distance, const LinearParams& params,
         RobotState& state, RobotState& next_state)
 {
     tf::Transform pose;
-    RobotState current(state);
-    list<RobotState> buffer;
+    RobotState left(state);
+    RobotState right(next_state);
+    RobotState mid(state);
+    vector<RobotState> buffer;
+    deque<RobotState> queue;
+    bool is_even = false;
+    double step = params.interpolation_step / 2;
+    //Another dist
+    double current_distance = valid_distance + step;
     double translation = getMaxTranslation(state, next_state);
-    while (translation > LINEAR_TARGET_PRECISION){
-        ROS_WARN("Too great translation: %f", translation);
-        interpolator.interpolateByDistance(params.interpolation_step / 2, pose, current);
-        if (!solver.setStateFromIK(params, pose, current))
+    interpolator.interpolateByDistance(current_distance, pose, mid);
+    if (!solver.setStateFromIK(params, pose, mid))
+        throw runtime_error("Invalid trajectory!");
+    buffer.push_back(mid);
+    current_distance += step / 2;
+    int idx = 0;
+
+    while (!queue.empty()){
+        if (getMaxTranslation(left, right) > LINEAR_TARGET_PRECISION){
+            if (is_even)
+            {
+
+                current_distance += step;
+                is_even = false;
+            }
+            else{
+                mid = right;
+                mid = queue.front();
+                queue.pop_front();
+                current_distance -= step - idx * (step / 2);
+                is_even = true;
+                ROS_WARN("Too great translation: %f", translation);
+                interpolator.interpolateByDistance(current_distance, pose, mid);
+                if (!solver.setStateFromIK(params, pose, mid))
+                    throw runtime_error("Invalid trajectory!");
+                queue.push_back(mid);
+                buffer.insert(buffer.begin() + 2 * idx + 1, mid);
+            }
+        }
+        current_distance -= step;
+
+
+        buffer.push_back(mid);
+        translation = getMaxTranslation(state, buffer[0]);
+        current_distance += step;
+        interpolator.interpolateByDistance(current_distance, pose, mid);
+        if (!solver.setStateFromIK(params, pose, mid))
             throw runtime_error("Invalid trajectory!");
-        translation = getMaxTranslation(state, current);
-        buffer.push_back(current);
+        buffer.push_back(mid);
     }
     for (auto elem : buffer)
         *out++ = elem;
@@ -448,9 +488,15 @@ int main(int argc, char** argv)
                                      STANDARD_INTERPOLATION_STEP);
     PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
     linearInterpolationTemplate(params, kt_kinematic_state, interpolator, solver, approximate_steps, out);
+    auto out_traj = inserter(trajectory, next(trajectory.begin()));
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it)
-        splitTrajectoryTemplate(out, interpolator, solver, params, *state_it, *next(state_it));
-
+    {
+        double valid_distance = 0;
+        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
+            splitTrajectoryTemplate(out_traj, interpolator, solver, valid_distance, params, *state_it, *next(state_it));
+        }
+        ++out_traj;
+    }
 //
 //    if (is_interpolated){
 //        thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
