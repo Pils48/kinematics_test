@@ -39,6 +39,11 @@ static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double DISTANCE_TOLERANCE = 0.00015;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
+struct RobotPosition
+{
+    RobotState& base_state;
+    tf::Transform robot_pose;
+};
 
 class TransformSlerper
 {
@@ -85,8 +90,8 @@ public:
     }
 
 private:
-    const tf::Transform &source;
-    const tf::Transform &target;
+    const tf::Transform source;
+    const tf::Transform target;
     tf::Quaternion source_rotation, target_rotation;
     double total_distance;
     double total_angle;
@@ -126,6 +131,7 @@ public:
     void interpolateByPercentage(double percentage, tf::Transform &pose, RobotState &state)
     {
         pose = _slerper.slerpByPercentage(percentage);
+        _start_state.interpolate(_end_state, percentage, state);
         state.update();
     }
 
@@ -175,6 +181,33 @@ public:
     }
 };
 
+template <typename Interpolator>
+Interpolator getInterpolator(const LinearParams& params, RobotState& left, RobotState& right)
+{
+    tf::Transform left_pose;
+    tf::Transform right_pose;
+    tf::poseEigenToTF(left.getGlobalLinkTransform(params.end_effector), left_pose);
+    tf::poseEigenToTF(right.getGlobalLinkTransform(params.end_effector), right_pose);
+    Interpolator interpolator(left_pose, right_pose, left, right);
+    return interpolator;
+}
+
+template <typename Interpolator, typename IKSolver>
+RobotState getMidState(const LinearParams& params, RobotState& start_state, RobotState& end_state, IKSolver&& solver)
+{
+    tf::Transform pose;
+    RobotState result(start_state);
+    //Use interface to make abstract factory??
+    auto interpolator = getInterpolator<PoseAndStateInterpolator>(params, start_state, end_state);
+    interpolator.interpolateByPercentage(0.5, pose, result);
+    if (solver.setStateFromIK(params, pose, result)){
+        return result;
+    }
+    else {
+        throw runtime_error("Invalid trajectory!");
+    }
+}
+
 double getFullTranslation(RobotState& state, RobotState& next_state, string link_name)
 {
     auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
@@ -205,75 +238,49 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
         IKSolver&& solver, size_t steps, OutputIterator out)
 {
     RobotState current(base_state);
+    RobotState prev(base_state);
     *out++ = current;
     tf::Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
+        prev = current;
         double percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
         if (!solver.setStateFromIK(params, pose, current))
             return false;
+        ROS_WARN("Translation : %f", getMaxTranslation(prev, current));
         *out++ = current;
     }
     return true;
 }
 
 template <typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, double& valid_distance, const LinearParams& params,
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
         RobotState& state, RobotState& next_state)
 {
-    tf::Transform pose;
+    size_t segments;
     RobotState left(state);
     RobotState right(next_state);
-    RobotState mid(state);
+    RobotState mid(next_state);
+    deque<RobotState> state_stack;
     vector<RobotState> buffer;
-    deque<RobotState> queue;
-    bool is_even = false;
-    double step = params.interpolation_step / 2;
-    //Another dist
-    double current_distance = valid_distance + step;
-    double translation = getMaxTranslation(state, next_state);
-    interpolator.interpolateByDistance(current_distance, pose, mid);
-    if (!solver.setStateFromIK(params, pose, mid))
-        throw runtime_error("Invalid trajectory!");
-    buffer.push_back(mid);
-    current_distance += step / 2;
-    int idx = 0;
-
-    while (!queue.empty()){
-        if (getMaxTranslation(left, right) > LINEAR_TARGET_PRECISION){
-            if (is_even)
-            {
-
-                current_distance += step;
-                is_even = false;
-            }
-            else{
-                mid = right;
-                mid = queue.front();
-                queue.pop_front();
-                current_distance -= step - idx * (step / 2);
-                is_even = true;
-                ROS_WARN("Too great translation: %f", translation);
-                interpolator.interpolateByDistance(current_distance, pose, mid);
-                if (!solver.setStateFromIK(params, pose, mid))
-                    throw runtime_error("Invalid trajectory!");
-                queue.push_back(mid);
-                buffer.insert(buffer.begin() + 2 * idx + 1, mid);
-            }
+    state_stack.push_back(mid);
+    while (!state_stack.empty()){
+        right = state_stack.back();
+        mid = getMidState<Interpolator>(params, left, right, solver);
+        double translation = getMaxTranslation(left, right);
+        ROS_WARN("Too great translation: %f", translation);
+        if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION)
+            state_stack.push_back(mid);
+        else {
+            buffer.push_back(mid);
+            state_stack.pop_back();
+            left = mid;
         }
-        current_distance -= step;
-
-
-        buffer.push_back(mid);
-        translation = getMaxTranslation(state, buffer[0]);
-        current_distance += step;
-        interpolator.interpolateByDistance(current_distance, pose, mid);
-        if (!solver.setStateFromIK(params, pose, mid))
-            throw runtime_error("Invalid trajectory!");
-        buffer.push_back(mid);
     }
-    for (auto elem : buffer)
-        *out++ = elem;
+    segments = buffer.size();
+    for (auto state : buffer)
+        *out++ = state;
+    return segments;
 }
 
 template <typename Interpolator, typename IKSolver>
@@ -462,7 +469,7 @@ int main(int argc, char** argv)
     //end of initialization
 
     tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 1.0, 1.565));
+    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.385, 0.0, 1.565));
     Isometry3d goal_transform;
     Isometry3d start_transform;
 
@@ -491,23 +498,16 @@ int main(int argc, char** argv)
     auto out_traj = inserter(trajectory, next(trajectory.begin()));
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it)
     {
-        double valid_distance = 0;
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            splitTrajectoryTemplate(out_traj, interpolator, solver, valid_distance, params, *state_it, *next(state_it));
+            advance(state_it, splitTrajectoryTemplate(out_traj, interpolator, solver, params, *state_it, *next(state_it)));
         }
         ++out_traj;
     }
-//
-//    if (is_interpolated){
-//        thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
-//        checkJump(trajectory);
-//        splitTrajectorySegment(trajectory, LINEAR_TARGET_PRECISION);
-//        check_collision_thread.join();
-//    }
+
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
-        this_thread::sleep_for(chrono::milliseconds(10));
+        this_thread::sleep_for(chrono::milliseconds(220));
         visual_tools.publishRobotState(*it);
-        this_thread::sleep_for(chrono::milliseconds(10));
+        this_thread::sleep_for(chrono::milliseconds(30));
         visual_tools.deleteAllMarkers();
     }
 }
