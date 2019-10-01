@@ -21,7 +21,6 @@
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
-
 #define FANUC_M20IA_END_EFFECTOR "tool0"
 #define DEFAULT_ROBOT_DESCRIPTION "robot_description"
 #define PLANNING_GROUP "manipulator"
@@ -33,10 +32,7 @@ using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
-static const double DISTANCE_CONTINUITY_PRECISION = 0.00001;
-static const double ANGLE_CONTINUITY_PRECISION = angles::from_degrees(0.005);
 static const double LINEAR_TARGET_PRECISION = 0.005;
-static const double DISTANCE_TOLERANCE = 0.00015;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 struct RobotPosition
@@ -200,12 +196,7 @@ RobotState getMidState(const LinearParams& params, RobotState& start_state, Robo
     //Use interface to make abstract factory??
     auto interpolator = getInterpolator<PoseAndStateInterpolator>(params, start_state, end_state);
     interpolator.interpolateByPercentage(0.5, pose, result);
-    if (solver.setStateFromIK(params, pose, result)){
-        return result;
-    }
-    else {
-        throw runtime_error("Invalid trajectory!");
-    }
+    return result;
 }
 
 double getFullTranslation(RobotState& state, RobotState& next_state, string link_name)
@@ -254,7 +245,7 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
 }
 
 template <typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
+size_t splitTrajectoryTemplate(OutputIterator& out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
         RobotState& state, RobotState& next_state)
 {
     size_t segments;
@@ -314,67 +305,6 @@ bool checkJumpTemplate(const LinearParams& params, Interpolator&& interpolator, 
     return true;
 }
 
-/** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
- * for translation parameter. Return true in case of success. Trail assumed to be empty*/
-bool interpolate(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
-        size_t translation_steps, bool global_reference_frame = true)
-{
-    auto *jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
-    auto inserter = back_inserter(trail);
-    inserter = RobotStatePtr(new RobotState(kinematic_state));
-    auto *ptr_link_model = kinematic_state.getLinkModel(FANUC_M20IA_END_EFFECTOR);
-
-    Affine3d start_pose = kinematic_state.getGlobalLinkTransform(ptr_link_model);
-
-    // the target can be in the local reference frame (in which case we rotate it)
-    Affine3d rotated_target = global_reference_frame ? goal_transform : start_pose * goal_transform;
-
-    Quaterniond start_quaternion(start_pose.rotation());
-    Quaterniond target_quaternion(rotated_target.rotation());
-
-    size_t steps = translation_steps + 1;
-
-    for (size_t i = 1; i <= steps; ++i) {
-        double percentage = (double) i / (double) steps;
-
-        Isometry3d pose(start_quaternion.slerp(percentage, target_quaternion));
-
-        pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
-
-        if (kinematic_state.setFromIK(jmg_ptr, pose))
-            inserter = RobotStatePtr(new RobotState(kinematic_state));
-        else {
-            ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
-            trail.clear();
-            return false;
-        }
-    }
-    return true;
-}
-
-RobotStatePtr getMiddleState(RobotState state, RobotState next_state)
-{
-    list<RobotStatePtr> segment_to_check;
-    auto is_interpolated = interpolate(segment_to_check, state, next_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
-    return is_interpolated ? *next(segment_to_check.begin()) : nullptr;
-}
-
-double getFullTranslation(const RobotStatePtr state, const RobotStatePtr next_state, string link_name)
-{
-    return getFullTranslation(state, next_state, link_name);
-}
-
-pair<string, double> getMaxTranslation(const RobotStatePtr state, const RobotStatePtr next_state)
-{
-    pair<string, double> max_pair = make_pair("", 0);
-    for (auto link : state->getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
-        if (getFullTranslation(state, next_state, link->getName()) >= max_pair.second){
-            max_pair.first = link->getName();
-            max_pair.second = getFullTranslation(state, next_state, link->getName());
-        }
-    return max_pair;
-}
-
 void checkAllowedCollision(RobotState& state, planning_scene::PlanningScenePtr current_scene)
 {
     collision_detection::CollisionRequest req;
@@ -394,44 +324,6 @@ void checkAllowedCollision(RobotState& state, planning_scene::PlanningScenePtr c
     }
     else
         throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
-}
-
-void checkJump(list<RobotStatePtr> trajectory)
-{
-    for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it){
-        auto right = *next(state_it);
-        auto left = *state_it;
-        auto dist = right->distance(*left);
-
-        while (dist > CONTINUITY_CHECK_THRESHOLD){
-            auto mid = getMiddleState(*right, *left);
-            if (!mid)
-                throw runtime_error("Space jump happened!\nInvalid trajectory!");
-            dist /= 2;
-            auto lm = left->distance(*mid);
-            auto mr = mid->distance(*right);
-            (lm > mr) ? right = mid : left = mid;
-        }
-        if (right->distance(*left) >= CONTINUITY_CHECK_THRESHOLD + DISTANCE_TOLERANCE)
-            throw runtime_error("Space jump happened!\nInvalid trajectory!");
-    }
-}
-
-void splitTrajectorySegment(list<RobotStatePtr>& trail, double critical_distance)
-{
-    for (auto state_it = trail.begin(); state_it != prev(trail.end()); ++state_it){
-        auto translation_pair = getMaxTranslation(*state_it, *next(state_it));
-
-        while (translation_pair.second > critical_distance) {
-            auto mid_state = getMiddleState(**state_it, **next(state_it));
-            if (mid_state) {
-                auto insert_it = inserter(trail, next(state_it));
-                insert_it = mid_state;
-                translation_pair.second = getFullTranslation(*state_it, *next(state_it), translation_pair.first);
-            } else
-                throw runtime_error("Space jump happened!\nInvalid trajectory!");
-        }
-    }
 }
 
 void checkCollision(list<RobotStatePtr> trajectory, planning_scene::PlanningScenePtr current_scene)
@@ -499,13 +391,13 @@ int main(int argc, char** argv)
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it)
     {
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            advance(state_it, splitTrajectoryTemplate(out_traj, interpolator, solver, params, *state_it, *next(state_it)));
+            splitTrajectoryTemplate(out_traj, interpolator, solver, params, *state_it, *next(state_it));
+            ++out_traj;
         }
-        ++out_traj;
     }
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
-        this_thread::sleep_for(chrono::milliseconds(220));
+        this_thread::sleep_for(chrono::milliseconds(20));
         visual_tools.publishRobotState(*it);
         this_thread::sleep_for(chrono::milliseconds(30));
         visual_tools.deleteAllMarkers();
