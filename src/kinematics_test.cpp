@@ -32,7 +32,7 @@ using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
-static const double LINEAR_TARGET_PRECISION = 0.005;
+static const double LINEAR_TARGET_PRECISION = 0.003;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 struct RobotPosition
@@ -188,8 +188,8 @@ Interpolator getInterpolator(const LinearParams& params, RobotState& left, Robot
     return interpolator;
 }
 
-template <typename Interpolator, typename IKSolver>
-RobotState getMidState(const LinearParams& params, RobotState& start_state, RobotState& end_state, IKSolver&& solver)
+template <typename Interpolator>
+RobotState getMidState(const LinearParams& params, RobotState& start_state, RobotState& end_state)
 {
     tf::Transform pose;
     RobotState result(start_state);
@@ -229,23 +229,18 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
         IKSolver&& solver, size_t steps, OutputIterator out)
 {
     RobotState current(base_state);
-    RobotState prev(base_state);
     *out++ = current;
     tf::Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
-        prev = current;
         double percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
-        if (!solver.setStateFromIK(params, pose, current))
-            return false;
-        ROS_WARN("Translation : %f", getMaxTranslation(prev, current));
         *out++ = current;
     }
     return true;
 }
 
-template <typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator& out, Interpolator&& interpolator, IKSolver&& solver, const LinearParams& params,
+template <typename OutputIterator, typename Interpolator>
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, const LinearParams& params,
         RobotState& state, RobotState& next_state)
 {
     size_t segments;
@@ -257,7 +252,7 @@ size_t splitTrajectoryTemplate(OutputIterator& out, Interpolator&& interpolator,
     state_stack.push_back(mid);
     while (!state_stack.empty()){
         right = state_stack.back();
-        mid = getMidState<Interpolator>(params, left, right, solver);
+        mid = getMidState<Interpolator>(params, left, right);
         double translation = getMaxTranslation(left, right);
         ROS_WARN("Too great translation: %f", translation);
         if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION)
@@ -268,9 +263,8 @@ size_t splitTrajectoryTemplate(OutputIterator& out, Interpolator&& interpolator,
             left = mid;
         }
     }
+    copy(buffer.begin(), buffer.end(), out);
     segments = buffer.size();
-    for (auto state : buffer)
-        *out++ = state;
     return segments;
 }
 
@@ -360,8 +354,8 @@ int main(int argc, char** argv)
     visual_tools.loadRemoteControl();
     //end of initialization
 
-    tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.385, 0.0, 1.565));
+    tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0, 1.565));
+    tf::Transform tf_goal(tf::createQuaternionFromRPY(0,0, 0), tf::Vector3(1.085, 0, 1.565));
     Isometry3d goal_transform;
     Isometry3d start_transform;
 
@@ -369,37 +363,34 @@ int main(int argc, char** argv)
     tf::transformTFToEigen(tf_goal, goal_transform);
 
     //Check first and last state on allowed collision
-    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
-    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
-    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+//    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
+//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+//    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
+//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 
     kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
     RobotState goal_state(kt_kinematic_state);
-    kt_kinematic_state.setFromIK(joint_model_group_ptr,start_transform);
+    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
     RobotState start_state(kt_kinematic_state);
 
     list<RobotState> trajectory;
     auto out = back_inserter(trajectory);
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), STANDARD_INTERPOLATION_STEP};
     TestIKSolver solver;
-    size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
-                                     STANDARD_INTERPOLATION_STEP);
+    size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
     PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
-    linearInterpolationTemplate(params, kt_kinematic_state, interpolator, solver, approximate_steps, out);
-    auto out_traj = inserter(trajectory, next(trajectory.begin()));
+    linearInterpolationTemplate(params, kt_kinematic_state, interpolator, solver, (++approximate_steps), out);
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it)
     {
-        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            splitTrajectoryTemplate(out_traj, interpolator, solver, params, *state_it, *next(state_it));
-            ++out_traj;
-        }
+        auto insert_it = inserter(trajectory, next(state_it));
+        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION)
+            advance(state_it, splitTrajectoryTemplate(insert_it, interpolator, params, *state_it, *next(state_it)));
     }
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
-        this_thread::sleep_for(chrono::milliseconds(20));
+        this_thread::sleep_for(chrono::milliseconds(10));
         visual_tools.publishRobotState(*it);
-        this_thread::sleep_for(chrono::milliseconds(30));
+        this_thread::sleep_for(chrono::milliseconds(10));
         visual_tools.deleteAllMarkers();
     }
 }
