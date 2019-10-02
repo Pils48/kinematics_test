@@ -242,12 +242,10 @@ bool linearInterpolationTemplate(const LinearParams& params, const RobotState& b
 
 template <typename OutputIterator, typename Interpolator>
 size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, const LinearParams& params,
-        RobotState& state, RobotState& next_state)
+        RobotState& left, RobotState& right)
 {
     size_t segments;
-    RobotState left(state);
-    RobotState right(next_state);
-    RobotState mid(next_state);
+    RobotState mid(right);
     deque<RobotState> state_stack;
     vector<RobotState> buffer;
     state_stack.push_back(mid);
@@ -262,9 +260,9 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, 
             left = mid;
         }
     }
-    copy(buffer.begin(), prev(buffer.end()), out);
+    copy(buffer.begin(), buffer.end(), out);
     segments = buffer.size();
-    return segments - 1;
+    return segments;
 }
 
 template <typename Interpolator, typename IKSolver>
@@ -351,8 +349,8 @@ int main(int argc, char** argv)
     visual_tools.loadRemoteControl();
     //end of initialization
 
-    tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI_4, 0), tf::Vector3(1.085, 0, 1.565));
+    tf::Transform tf_start;
+    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI_2, 0), tf::Vector3(1.185, 0, 1.565));
     Isometry3d start_transform;
     Isometry3d goal_transform;
     tf::transformTFToEigen(tf_goal, goal_transform);
@@ -363,10 +361,12 @@ int main(int argc, char** argv)
 //    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 //    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
 //    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+
     RobotState goal_state(kt_kinematic_model);
     RobotState start_state(kt_kinematic_model);
     goal_state.setFromIK(joint_model_group_ptr, goal_transform);
-    start_state.setFromIK(joint_model_group_ptr, start_transform);
+    start_state.setToDefaultValues();
+    tf::transformEigenToTF(start_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_start);
 
     list<RobotState> trajectory;
     auto out = back_inserter(trajectory);
