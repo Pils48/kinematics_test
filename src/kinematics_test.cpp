@@ -10,6 +10,7 @@
 #include <thread>
 #include <iterator>
 
+#include <math.h>
 #include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
@@ -32,7 +33,7 @@ using namespace Eigen;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
-static const double LINEAR_TARGET_PRECISION = 0.003;
+static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 struct RobotPosition
@@ -208,7 +209,7 @@ double getFullTranslation(RobotState& state, RobotState& next_state, string link
     auto next_state_transform = next_state.getGlobalLinkTransform(link_name);
     Quaterniond start_quaternion(state_transform.rotation());
     Quaterniond target_quaternion(next_state_transform.rotation());
-
+    //Use shortestAngle in tf
     double sin_between_quaternions = sin(start_quaternion.angularDistance(target_quaternion));
     double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
 
@@ -219,8 +220,8 @@ double getFullTranslation(RobotState& state, RobotState& next_state, string link
 
 double getMaxTranslation(RobotState& state, RobotState& next_state){
     double max_dist = 0;
-    for (auto link : state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
-        max_dist = max(max_dist, getFullTranslation(state, next_state, link->getName()));
+    for (auto link_name : state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometryNames())
+        max_dist = max(max_dist, getFullTranslation(state, next_state, link_name));
     return max_dist;
 }
 
@@ -253,8 +254,6 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, 
     while (!state_stack.empty()){
         right = state_stack.back();
         mid = getMidState<Interpolator>(params, left, right);
-        double translation = getMaxTranslation(left, right);
-        ROS_WARN("Too great translation: %f", translation);
         if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION)
             state_stack.push_back(mid);
         else {
@@ -263,34 +262,32 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator&& interpolator, 
             left = mid;
         }
     }
-    copy(buffer.begin(), buffer.end(), out);
+    copy(buffer.begin(), prev(buffer.end()), out);
     segments = buffer.size();
-    return segments;
+    return segments - 1;
 }
 
 template <typename Interpolator, typename IKSolver>
 bool checkJumpTemplate(const LinearParams& params, Interpolator&& interpolator, IKSolver&& solver,
-                RobotState state, RobotState next_state)
+                RobotState left, RobotState right)
 {
     tf::Transform mid_pose;
-    RobotState mid(state);
-    auto dist = state.distance(next_state);
+    RobotState mid(left);
+    auto dist = left.distance(right);
     double percentage = 1;
     while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD){
         percentage *= 0.5;
-        interpolator.interpolateByDistance(params.interpolation_step / 2, mid_pose, mid);
-        if (!solver.setStateFromIK(params, mid_pose, mid))
-            return false;
-        auto lm = state.distance(mid);
-        auto mr = mid.distance(next_state);
+        mid = getMidState<Interpolator>(params, left, right);
+        auto lm = left.distance(mid);
+        auto mr = mid.distance(right);
         if (lm < mr){
-            state = mid;
-            dist = mid.distance(next_state);
+            left = mid;
+            dist = mid.distance(right);
         }
         else
         {
-            next_state = mid;
-            dist = state.distance(mid);
+            right = mid;
+            dist = left.distance(mid);
         }
     }
     if (percentage < 0.00005)
@@ -355,23 +352,21 @@ int main(int argc, char** argv)
     //end of initialization
 
     tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0,0, 0), tf::Vector3(1.085, 0, 1.565));
-    Isometry3d goal_transform;
+    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI_4, 0), tf::Vector3(1.085, 0, 1.565));
     Isometry3d start_transform;
-
-    tf::transformTFToEigen(tf_start, start_transform);
+    Isometry3d goal_transform;
     tf::transformTFToEigen(tf_goal, goal_transform);
+    tf::transformTFToEigen(tf_start, start_transform);
 
     //Check first and last state on allowed collision
 //    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
 //    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 //    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
 //    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
-
-    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-    RobotState goal_state(kt_kinematic_state);
-    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
-    RobotState start_state(kt_kinematic_state);
+    RobotState goal_state(kt_kinematic_model);
+    RobotState start_state(kt_kinematic_model);
+    goal_state.setFromIK(joint_model_group_ptr, goal_transform);
+    start_state.setFromIK(joint_model_group_ptr, start_transform);
 
     list<RobotState> trajectory;
     auto out = back_inserter(trajectory);
@@ -388,9 +383,9 @@ int main(int argc, char** argv)
     }
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
-        this_thread::sleep_for(chrono::milliseconds(10));
+        this_thread::sleep_for(chrono::milliseconds(1));
         visual_tools.publishRobotState(*it);
-        this_thread::sleep_for(chrono::milliseconds(10));
+        this_thread::sleep_for(chrono::milliseconds(1));
         visual_tools.deleteAllMarkers();
     }
 }
