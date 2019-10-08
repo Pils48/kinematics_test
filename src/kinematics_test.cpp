@@ -94,16 +94,6 @@ public:
     ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
     }
 
-    static Transform getMidState(RobotState &left, RobotState &right, string end_effector)
-    {
-        Transform left_pose, mid_pose, right_pose;
-        poseEigenToTF(left.getGlobalLinkTransform(end_effector), left_pose);
-        poseEigenToTF(right.getGlobalLinkTransform(end_effector), right_pose);
-        TransformSlerper tmp_slerper(left_pose, right_pose);
-        mid_pose = tmp_slerper.slerpByPercentage(0.5);
-        return mid_pose;
-    }
-
     void interpolateByPercentage(double percentage, Transform &pose, RobotState &state) {
         pose = _slerper.slerpByPercentage(percentage);
         _start_state.interpolate(_end_state, percentage, state);
@@ -196,9 +186,10 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
 }
 
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
                                RobotState left, RobotState right) {
     size_t segments;
+    double percentage = 1;
     Transform mid_pose;
     RobotState mid(right);
     deque<RobotState> state_stack;
@@ -206,14 +197,16 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, I
     state_stack.push_back(mid);
     while (!state_stack.empty()) {
         right = state_stack.back();
-        mid_pose = Interpolator::getMidState(left, right, params.end_effector->getName());
+        interpolator.interpolateByPercentage(percentage, mid_pose, left);
         if (!solver.setStateFromIK(params, mid_pose, mid)){
             throw runtime_error("Invalid trajectory!");
         }
         if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION){
+            percentage *= 0.5;
             state_stack.push_back(mid);
         }
         else {
+            percentage /= 0.5;
             buffer.push_back(mid);
             state_stack.pop_back();
             left = mid;
@@ -225,29 +218,32 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, I
 }
 
 template<typename Interpolator, typename IKSolver>
-bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver,
+bool checkJumpTemplate(const LinearParams &params, Interpolator &&interpolator, IKSolver &&solver,
                        RobotState left, RobotState right) {
     Transform mid_pose;
     RobotState mid(left);
     auto dist = left.distance(right);
-    double percentage = 1;
-    while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
-        percentage *= 0.5;
-        mid_pose = Interpolator::getMidState(left, right, params.end_effector->getName());
+    double offset = 0;
+    double part = 1;
+    while (part >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
+        part *= 0.5;
+        interpolator.interpolateByPercentage(0.5 + offset, mid_pose, mid);
         if (!solver.setStateFromIK(params, mid_pose, mid)){
             throw runtime_error("Invalid trajectory!");
         }
         auto lm = left.distance(mid);
         auto mr = mid.distance(right);
         if (lm < mr) {
+            offset += part;
             left = mid;
             dist = mid.distance(right);
         } else {
+            offset -= part;
             right = mid;
             dist = left.distance(mid);
         }
     }
-    if (percentage < 0.00005)
+    if (part < 0.00005)
         return false;
 
     return true;
@@ -306,7 +302,7 @@ int main(int argc, char **argv)
     //end of initialization
 
     Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
-    Transform tf_goal(createQuaternionFromRPY(0, M_PI_4, 0), Vector3(1.185, 0, 1.565));
+    Transform tf_goal(createQuaternionFromRPY(0, M_PI_2 * 0.7, 0), Vector3(1.185, 0, 1.565));
     Eigen::Isometry3d start_transform;
     Eigen::Isometry3d goal_transform;
     transformTFToEigen(tf_goal, goal_transform);
@@ -327,17 +323,19 @@ int main(int argc, char **argv)
     auto out = back_inserter(trajectory);
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR),
                            STANDARD_INTERPOLATION_STEP};
-    TestIKSolver solver;
     size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
-    PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
-    linearInterpolationTemplate(params, start_state, interpolator, solver, approximate_steps, out);
+    linearInterpolationTemplate(params, start_state, PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state), TestIKSolver(), approximate_steps, out);
 
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
         auto insert_it = inserter(trajectory, next(state_it));
+        poseEigenToTF(state_it->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_start);
+        poseEigenToTF(next(state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_goal);
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            if (!checkJumpTemplate(params, interpolator, solver, *state_it, *next(state_it)))
+            if (!checkJumpTemplate(params,
+                    PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), *state_it, *next(state_it)))
                 throw runtime_error("Invalid trajectory!");
-            advance(state_it,splitTrajectoryTemplate(insert_it, interpolator, solver, params, *state_it, *next(state_it)));
+            advance(state_it,splitTrajectoryTemplate(insert_it,
+                    PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), params, *state_it, *next(state_it)));
         }
     }
     checkCollision(trajectory, kt_planning_scene);
