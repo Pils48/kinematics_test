@@ -39,7 +39,7 @@ static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 struct RobotPosition {
     RobotState &base_state;
-    Transform robot_pose;
+    Transform &robot_pose;
 };
 
 class TransformSlerper {
@@ -147,8 +147,8 @@ public:
     bool setStateFromIK(const LinearParams &params, Transform &pose, RobotState &state) {
         Eigen::Isometry3d eigen_pose;
         poseTFToEigen(pose, eigen_pose);
-        return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState* robot_state, const JointModelGroup* joint_group,
-                const double* joint_group_variable_values){
+        return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState *robot_state, const JointModelGroup *joint_group,
+                const double *joint_group_variable_values){
             return true;
         });
     }
@@ -196,7 +196,7 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
 }
 
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, IKSolver&& solver, const LinearParams &params,
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
                                RobotState left, RobotState right) {
     size_t segments;
     Transform mid_pose;
@@ -272,14 +272,15 @@ void checkAllowedCollision(RobotState &state, planning_scene::PlanningScenePtr c
         throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
 }
 
-void checkCollision(list<RobotStatePtr> trajectory, planning_scene::PlanningScenePtr current_scene) {
+void checkCollision(list<RobotState> trajectory, planning_scene::PlanningScenePtr current_scene) {
     for (auto state_it = next(trajectory.begin()); state_it != prev(trajectory.end()); ++state_it) {
-        if (current_scene->isStateColliding(**state_it, PLANNING_GROUP, true))
+        if (current_scene->isStateColliding(*state_it, PLANNING_GROUP, true))
             throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     //Initialization
     ros::init(argc, argv, "kinematics_test");
     ros::NodeHandle node_handle;
@@ -331,13 +332,6 @@ int main(int argc, char **argv) {
     PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
     linearInterpolationTemplate(params, start_state, interpolator, solver, approximate_steps, out);
 
-    for (auto it = trajectory.begin(); it != trajectory.end(); ++it) {
-        this_thread::sleep_for(chrono::milliseconds(10));
-        visual_tools.publishRobotState(*it);
-        this_thread::sleep_for(chrono::milliseconds(10));
-        visual_tools.deleteAllMarkers();
-    }
-
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
         auto insert_it = inserter(trajectory, next(state_it));
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
@@ -346,11 +340,5 @@ int main(int argc, char **argv) {
             advance(state_it,splitTrajectoryTemplate(insert_it, interpolator, solver, params, *state_it, *next(state_it)));
         }
     }
-
-    for (auto it = trajectory.begin(); it != trajectory.end(); ++it) {
-        this_thread::sleep_for(chrono::milliseconds(1));
-        visual_tools.publishRobotState(*it);
-        this_thread::sleep_for(chrono::milliseconds(1));
-        visual_tools.deleteAllMarkers();
-    }
+    checkCollision(trajectory, kt_planning_scene);
 }
