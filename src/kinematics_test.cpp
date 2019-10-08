@@ -94,18 +94,14 @@ public:
     ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
     }
 
-    PoseAndStateInterpolator(
-            const Isometry3d &source,
-            const Isometry3d &target,
-            const RobotState &start_state,
-            const RobotState &end_state
-    ) : _start_state(start_state), _end_state(end_state), _slerper(paramToTF(source), paramToTF(target)) {
-    }
-
-    tf::Transform paramToTF(const Isometry3d &source) {
-        tf::Transform res_pose;
-        tf::poseEigenToTF(source, res_pose);
-        return res_pose;
+    static tf::Transform getMidState(RobotState &left, RobotState &right, string end_effector)
+    {
+        tf::Transform left_pose, mid_pose, right_pose;
+        tf::poseEigenToTF(left.getGlobalLinkTransform(end_effector), left_pose);
+        tf::poseEigenToTF(right.getGlobalLinkTransform(end_effector), right_pose);
+        TransformSlerper tmp_slerper(left_pose, right_pose);
+        mid_pose = tmp_slerper.slerpByPercentage(0.5);
+        return mid_pose;
     }
 
     void interpolateByPercentage(double percentage, tf::Transform &pose, RobotState &state) {
@@ -158,30 +154,6 @@ public:
     }
 };
 
-template<typename Interpolator>
-Interpolator* getInterpolator(const LinearParams &params, RobotState &left, RobotState &right) {
-    tf::Transform left_pose;
-    tf::Transform right_pose;
-    tf::poseEigenToTF(left.getGlobalLinkTransform(params.end_effector), left_pose);
-    tf::poseEigenToTF(right.getGlobalLinkTransform(params.end_effector), right_pose);
-    return new Interpolator(left_pose, right_pose, left, right);
-}
-
-template<typename Interpolator>
-tf::Transform getMidState(const LinearParams &params, RobotState& left, RobotState& right) {
-    tf::Transform res_pose;
-    RobotState result(left);
-    tf::Transform left_pose;
-    tf::Transform right_pose;
-    tf::poseEigenToTF(left.getGlobalLinkTransform(params.end_effector), left_pose);
-    tf::poseEigenToTF(right.getGlobalLinkTransform(params.end_effector), right_pose);
-    PoseAndStateInterpolator interpolator(left_pose, right_pose, left, right);
-    //Use interface to make abstract factory??
-//    Interpolator interpolator = getInterpolator<Interpolator>(params, left, right);
-    interpolator.interpolateByPercentage(0.5, res_pose, result);
-    return res_pose;
-}
-
 double getFullTranslation(RobotState &state, RobotState &next_state, string link_name) {
     auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
     Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
@@ -214,7 +186,7 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
     tf::Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
         double percentage = (double) i / (double) steps;
-        interpolator->interpolateByPercentage(percentage, pose, current);
+        interpolator.interpolateByPercentage(percentage, pose, current);
         if (!solver.setStateFromIK(params, pose, current)){
             return false;
         }
@@ -224,7 +196,7 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
 }
 
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &&interpolator, IKSolver&& solver, const LinearParams &params,
+size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, IKSolver&& solver, const LinearParams &params,
                                RobotState left, RobotState right) {
     size_t segments;
     tf::Transform mid_pose;
@@ -234,7 +206,7 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &&interpolator, 
     state_stack.push_back(mid);
     while (!state_stack.empty()) {
         right = state_stack.back();
-        mid_pose = getMidState<PoseAndStateInterpolator>(params, left, right);
+        mid_pose = Interpolator::getMidState(left, right, params.end_effector->getName());
         if (!solver.setStateFromIK(params, mid_pose, mid)){
             throw runtime_error("Invalid trajectory!");
         }
@@ -253,7 +225,7 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &&interpolator, 
 }
 
 template<typename Interpolator, typename IKSolver>
-bool checkJumpTemplate(const LinearParams &params, Interpolator&& interpolator, IKSolver &&solver,
+bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver,
                        RobotState left, RobotState right) {
     tf::Transform mid_pose;
     RobotState mid(left);
@@ -261,7 +233,7 @@ bool checkJumpTemplate(const LinearParams &params, Interpolator&& interpolator, 
     double percentage = 1;
     while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
         percentage *= 0.5;
-        mid_pose = getMidState<Interpolator>(params, left, right);
+        mid_pose = Interpolator::getMidState(left, right, params.end_effector->getName());
         if (!solver.setStateFromIK(params, mid_pose, mid)){
             throw runtime_error("Invalid trajectory!");
         }
@@ -345,10 +317,10 @@ int main(int argc, char **argv) {
 //    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
 //    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
 
-    RobotState goal_state(kt_kinematic_model);
-    RobotState start_state(kt_kinematic_model);
-    goal_state.setFromIK(joint_model_group_ptr, goal_transform);
-    start_state.setFromIK(joint_model_group_ptr, start_transform);
+    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
+    RobotState goal_state(kt_kinematic_state);
+    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
+    RobotState start_state(kt_kinematic_state);
 
     list<RobotState> trajectory;
     auto out = back_inserter(trajectory);
@@ -356,14 +328,23 @@ int main(int argc, char **argv) {
                            STANDARD_INTERPOLATION_STEP};
     TestIKSolver solver;
     size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
-    PoseAndStateInterpolator* interpolator = new PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state);
+    PoseAndStateInterpolator interpolator(tf_start, tf_goal, start_state, goal_state);
     linearInterpolationTemplate(params, start_state, interpolator, solver, approximate_steps, out);
+
+    for (auto it = trajectory.begin(); it != trajectory.end(); ++it) {
+        this_thread::sleep_for(chrono::milliseconds(10));
+        visual_tools.publishRobotState(*it);
+        this_thread::sleep_for(chrono::milliseconds(10));
+        visual_tools.deleteAllMarkers();
+    }
+
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
         auto insert_it = inserter(trajectory, next(state_it));
-        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION)
+        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
             if (!checkJumpTemplate(params, interpolator, solver, *state_it, *next(state_it)))
                 throw runtime_error("Invalid trajectory!");
-            advance(state_it, splitTrajectoryTemplate(insert_it, interpolator, solver, params, *state_it, *next(state_it)));
+            advance(state_it,splitTrajectoryTemplate(insert_it, interpolator, solver, params, *state_it, *next(state_it)));
+        }
     }
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it) {
