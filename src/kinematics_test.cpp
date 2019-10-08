@@ -29,7 +29,7 @@
 using namespace std;
 using namespace moveit;
 using namespace core;
-using namespace Eigen;
+using namespace tf;
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
@@ -39,30 +39,30 @@ static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 struct RobotPosition {
     RobotState &base_state;
-    tf::Transform robot_pose;
+    Transform robot_pose;
 };
 
 class TransformSlerper {
 public:
-    TransformSlerper(const tf::Transform &source, const tf::Transform &target)
+    TransformSlerper(const Transform &source, const Transform &target)
             : source(source), target(target), source_rotation(source.getRotation()),
               target_rotation(target.getRotation()), total_distance(target.getOrigin().distance(source.getOrigin())),
               total_angle(source_rotation.angleShortestPath(target_rotation)) {}
 
-    tf::Transform slerpByPercentage(double percentage) const {
-        return tf::Transform(
+    Transform slerpByPercentage(double percentage) const {
+        return Transform(
                 source_rotation.slerp(target_rotation, percentage),
                 percentage * target.getOrigin() + (1 - percentage) * source.getOrigin()
         );
     }
 
-    tf::Transform slerpByDistance(double distance) const {
+    Transform slerpByDistance(double distance) const {
         if (total_distance < std::numeric_limits<double>::epsilon())
             return source;
         return slerpByPercentage(distance / total_distance);
     }
 
-    tf::Transform slerpByAngle(double angle) const {
+    Transform slerpByAngle(double angle) const {
         if (total_angle < std::numeric_limits<double>::epsilon())
             return source;
         return slerpByPercentage(angle / total_angle);
@@ -77,9 +77,9 @@ public:
     }
 
 private:
-    const tf::Transform source;
-    const tf::Transform target;
-    tf::Quaternion source_rotation, target_rotation;
+    const Transform source;
+    const Transform target;
+    Quaternion source_rotation, target_rotation;
     double total_distance;
     double total_angle;
 };
@@ -87,36 +87,36 @@ private:
 class PoseAndStateInterpolator {
 public:
     PoseAndStateInterpolator(
-            const tf::Transform &source,
-            const tf::Transform &target,
+            const Transform &source,
+            const Transform &target,
             const RobotState &start_state,
             const RobotState &end_state
     ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
     }
 
-    static tf::Transform getMidState(RobotState &left, RobotState &right, string end_effector)
+    static Transform getMidState(RobotState &left, RobotState &right, string end_effector)
     {
-        tf::Transform left_pose, mid_pose, right_pose;
-        tf::poseEigenToTF(left.getGlobalLinkTransform(end_effector), left_pose);
-        tf::poseEigenToTF(right.getGlobalLinkTransform(end_effector), right_pose);
+        Transform left_pose, mid_pose, right_pose;
+        poseEigenToTF(left.getGlobalLinkTransform(end_effector), left_pose);
+        poseEigenToTF(right.getGlobalLinkTransform(end_effector), right_pose);
         TransformSlerper tmp_slerper(left_pose, right_pose);
         mid_pose = tmp_slerper.slerpByPercentage(0.5);
         return mid_pose;
     }
 
-    void interpolateByPercentage(double percentage, tf::Transform &pose, RobotState &state) {
+    void interpolateByPercentage(double percentage, Transform &pose, RobotState &state) {
         pose = _slerper.slerpByPercentage(percentage);
         _start_state.interpolate(_end_state, percentage, state);
         state.update();
     }
 
-    void interpolateByDistance(double distance, tf::Transform &pose, RobotState &state) const {
+    void interpolateByDistance(double distance, Transform &pose, RobotState &state) const {
         pose = _slerper.slerpByDistance(distance);
         _start_state.interpolate(_end_state, distance / totalDistance(), state);
         state.update();
     }
 
-    void interpolateByAngle(double angle, tf::Transform &pose, RobotState &state) const {
+    void interpolateByAngle(double angle, Transform &pose, RobotState &state) const {
         pose = _slerper.slerpByAngle(angle);
         _start_state.interpolate(_end_state, angle / totalAngle(), state);
         state.update();
@@ -144,9 +144,9 @@ struct LinearParams {
 
 class TestIKSolver {
 public:
-    bool setStateFromIK(const LinearParams &params, tf::Transform &pose, RobotState &state) {
-        Isometry3d eigen_pose;
-        tf::poseTFToEigen(pose, eigen_pose);
+    bool setStateFromIK(const LinearParams &params, Transform &pose, RobotState &state) {
+        Eigen::Isometry3d eigen_pose;
+        poseTFToEigen(pose, eigen_pose);
         return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState* robot_state, const JointModelGroup* joint_group,
                 const double* joint_group_variable_values){
             return true;
@@ -156,12 +156,12 @@ public:
 
 double getFullTranslation(RobotState &state, RobotState &next_state, string link_name) {
     auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
-    Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+    Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
 
     auto state_transform = state.getGlobalLinkTransform(link_name);
     auto next_state_transform = next_state.getGlobalLinkTransform(link_name);
-    Quaterniond start_quaternion(state_transform.rotation());
-    Quaterniond target_quaternion(next_state_transform.rotation());
+    Eigen::Quaterniond start_quaternion(state_transform.rotation());
+    Eigen::Quaterniond target_quaternion(next_state_transform.rotation());
     //Use shortestAngle in tf
     double sin_between_quaternions = sin(start_quaternion.angularDistance(target_quaternion));
     double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
@@ -183,7 +183,7 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
                                  IKSolver &&solver, size_t steps, OutputIterator out) {
     RobotState current(base_state);
     *out++ = current;
-    tf::Transform pose;
+    Transform pose;
     for (size_t i = 1; i <= steps; ++i) {
         double percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
@@ -199,7 +199,7 @@ template<typename OutputIterator, typename Interpolator, typename IKSolver>
 size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, IKSolver&& solver, const LinearParams &params,
                                RobotState left, RobotState right) {
     size_t segments;
-    tf::Transform mid_pose;
+    Transform mid_pose;
     RobotState mid(right);
     deque<RobotState> state_stack;
     vector<RobotState> buffer;
@@ -227,7 +227,7 @@ size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &interpolator, I
 template<typename Interpolator, typename IKSolver>
 bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver,
                        RobotState left, RobotState right) {
-    tf::Transform mid_pose;
+    Transform mid_pose;
     RobotState mid(left);
     auto dist = left.distance(right);
     double percentage = 1;
@@ -304,12 +304,12 @@ int main(int argc, char **argv) {
     visual_tools.loadRemoteControl();
     //end of initialization
 
-    tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI_4, 0), tf::Vector3(1.185, 0, 1.565));
-    Isometry3d start_transform;
-    Isometry3d goal_transform;
-    tf::transformTFToEigen(tf_goal, goal_transform);
-    tf::transformTFToEigen(tf_start, start_transform);
+    Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
+    Transform tf_goal(createQuaternionFromRPY(0, M_PI_4, 0), Vector3(1.185, 0, 1.565));
+    Eigen::Isometry3d start_transform;
+    Eigen::Isometry3d goal_transform;
+    transformTFToEigen(tf_goal, goal_transform);
+    transformTFToEigen(tf_start, start_transform);
 
     //Check first and last state on allowed collision
 //    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
