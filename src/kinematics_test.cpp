@@ -38,7 +38,7 @@ static const double STANDARD_INTERPOLATION_STEP = 0.01;
 
 
 struct RobotPosition {
-    RobotState &base_state;
+    const RobotState &base_state;
     Transform &robot_pose;
 };
 
@@ -170,7 +170,8 @@ double getMaxTranslation(RobotState &state, RobotState &next_state) {
 
 template<typename Interpolator, typename IKSolver, typename OutputIterator>
 bool linearInterpolationTemplate(const LinearParams &params, const RobotState &base_state, Interpolator &&interpolator,
-                                 IKSolver &&solver, size_t steps, OutputIterator out) {
+            IKSolver &&solver, size_t steps, OutputIterator &&out)
+{
     RobotState current(base_state);
     *out++ = current;
     Transform pose;
@@ -186,7 +187,7 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
 }
 
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
+size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
                                RobotState left, RobotState right) {
     size_t segments;
     double percentage = 1;
@@ -320,21 +321,20 @@ int main(int argc, char **argv)
     RobotState start_state(kt_kinematic_state);
 
     list<RobotState> trajectory;
-    auto out = back_inserter(trajectory);
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR),
                            STANDARD_INTERPOLATION_STEP};
     size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
-    linearInterpolationTemplate(params, start_state, PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state), TestIKSolver(), approximate_steps, out);
+    linearInterpolationTemplate(params, start_state, PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state), TestIKSolver(),
+            approximate_steps, back_inserter(trajectory));
 
     for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
-        auto insert_it = inserter(trajectory, next(state_it));
         poseEigenToTF(state_it->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_start);
         poseEigenToTF(next(state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_goal);
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            if (!checkJumpTemplate(params,
-                    PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), *state_it, *next(state_it)))
+            if (!checkJumpTemplate(params,PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)),
+                    TestIKSolver(), *state_it, *next(state_it)))
                 throw runtime_error("Invalid trajectory!");
-            advance(state_it,splitTrajectoryTemplate(insert_it,
+            advance(state_it,splitTrajectoryTemplate(inserter(trajectory, next(state_it)),
                     PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), params, *state_it, *next(state_it)));
         }
     }
