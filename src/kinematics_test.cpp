@@ -3,13 +3,15 @@
  * using trac-ik as a kinematic solver.
  *********************************************************************/
 
-
 #include <ros/ros.h>
 
 #include <list>
 #include <chrono>
 #include <thread>
+#include <iterator>
 
+#include <math.h>
+#include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
 #include <tf_conversions/tf_eigen.h>
@@ -27,78 +29,130 @@
 using namespace std;
 using namespace moveit;
 using namespace core;
-using namespace robot_state;
-using namespace Eigen;
+using namespace tf;
 
-static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.0001;
+static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
-static const double DISTANCE_TOLERANCE = 0.00015;
+static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
-static const double EXPERIMENTAL_DISTANCE_CONSTRAINT = 0.005;
 
 
-bool validateIK(RobotState* robot_state, const JointModelGroup* joint_group,
-                const double* joint_group_variable_values)
-{
-    return robot_state->satisfiesBounds(joint_group);
-}
+struct RobotPosition {
+    const RobotState &base_state;
+    Transform &robot_pose;
+};
 
-/** Interpolate trajectory using slerp quaternion algorithm and linear algorithms
- * for translation parameter. Return true in case of success. Trail assumed to be empty*/
-bool linearInterpolation(list<RobotStatePtr>& trail, RobotState kinematic_state, const Affine3d& goal_transform,
-                         size_t translation_steps, bool global_reference_frame = true)
-{
-    auto *jmg_ptr = kinematic_state.getJointModelGroup(PLANNING_GROUP);
-    auto inserter = back_inserter(trail);
-    inserter = RobotStatePtr(new RobotState(kinematic_state));
-    auto *ptr_link_model = kinematic_state.getLinkModel(FANUC_M20IA_END_EFFECTOR);
+class TransformSlerper {
+public:
+    TransformSlerper(const Transform &source, const Transform &target)
+            : source(source), target(target), source_rotation(source.getRotation()),
+              target_rotation(target.getRotation()), total_distance(target.getOrigin().distance(source.getOrigin())),
+              total_angle(source_rotation.angleShortestPath(target_rotation)) {}
 
-    Affine3d start_pose = kinematic_state.getGlobalLinkTransform(ptr_link_model);
-
-    // the target can be in the local reference frame (in which case we rotate it)
-    Affine3d rotated_target = global_reference_frame ? goal_transform : start_pose * goal_transform;
-
-    Quaterniond start_quaternion(start_pose.rotation());
-    Quaterniond target_quaternion(rotated_target.rotation());
-
-    size_t steps = translation_steps + 1;
-
-    for (size_t i = 1; i <= steps; ++i) {
-        double percentage = (double) i / (double) steps;
-
-        Affine3d pose(start_quaternion.slerp(percentage, target_quaternion));
-
-        pose.translation() = percentage * rotated_target.translation() + (1 - percentage) * start_pose.translation();
-
-        if (kinematic_state.setFromIK(jmg_ptr, pose, ptr_link_model->getName(),
-                                      validateIK(&kinematic_state, jmg_ptr, kinematic_state.getVariablePositions())))
-            inserter = RobotStatePtr(new RobotState(kinematic_state));
-        else {
-            ROS_ERROR("Impossible to create whole path! Check self-collision or limits excess.");
-            trail.clear();
-            return false;
-        }
+    Transform slerpByPercentage(double percentage) const {
+        return Transform(
+                source_rotation.slerp(target_rotation, percentage),
+                percentage * target.getOrigin() + (1 - percentage) * source.getOrigin()
+        );
     }
-    return true;
-}
 
-RobotStatePtr getMiddleState(RobotState state, RobotState next_state)
-{
-    list<RobotStatePtr> segment_to_check;
-    auto is_interpolated = linearInterpolation(segment_to_check, state, next_state.getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), 1);
-    return is_interpolated ? *next(segment_to_check.begin()) : nullptr;
-}
+    Transform slerpByDistance(double distance) const {
+        if (total_distance < std::numeric_limits<double>::epsilon())
+            return source;
+        return slerpByPercentage(distance / total_distance);
+    }
 
-double getFullTranslation(const RobotStatePtr state, const RobotStatePtr next_state, string link_name)
-{
-    auto link_mesh_ptr = state->getLinkModel(link_name)->getShapes()[0].get();
-    Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+    Transform slerpByAngle(double angle) const {
+        if (total_angle < std::numeric_limits<double>::epsilon())
+            return source;
+        return slerpByPercentage(angle / total_angle);
+    }
 
-    const Affine3d state_transform = state->getGlobalLinkTransform(link_name);
-    const Affine3d next_state_transform = next_state->getGlobalLinkTransform(link_name);
-    Quaterniond start_quaternion(state_transform.rotation());
-    Quaterniond target_quaternion(next_state_transform.rotation());
+    double totalDistance() const {
+        return total_distance;
+    }
 
+    double totalAngle() const {
+        return total_angle;
+    }
+
+private:
+    const Transform source;
+    const Transform target;
+    Quaternion source_rotation, target_rotation;
+    double total_distance;
+    double total_angle;
+};
+
+class PoseAndStateInterpolator {
+public:
+    PoseAndStateInterpolator(
+            const Transform &source,
+            const Transform &target,
+            const RobotState &start_state,
+            const RobotState &end_state
+    ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
+    }
+
+    void interpolateByPercentage(double percentage, Transform &pose, RobotState &state) {
+        pose = _slerper.slerpByPercentage(percentage);
+        _start_state.interpolate(_end_state, percentage, state);
+        state.update();
+    }
+
+    void interpolateByDistance(double distance, Transform &pose, RobotState &state) const {
+        pose = _slerper.slerpByDistance(distance);
+        _start_state.interpolate(_end_state, distance / totalDistance(), state);
+        state.update();
+    }
+
+    void interpolateByAngle(double angle, Transform &pose, RobotState &state) const {
+        pose = _slerper.slerpByAngle(angle);
+        _start_state.interpolate(_end_state, angle / totalAngle(), state);
+        state.update();
+    }
+
+    double totalDistance() const {
+        return _slerper.totalDistance();
+    }
+
+    double totalAngle() const {
+        return _slerper.totalAngle();
+    }
+
+private:
+    TransformSlerper _slerper;
+    const RobotState &_start_state;
+    const RobotState &_end_state;
+};
+
+struct LinearParams {
+    const JointModelGroup *group;
+    const LinkModel *end_effector;
+    const double interpolation_step;
+};
+
+class TestIKSolver {
+public:
+    bool setStateFromIK(const LinearParams &params, Transform &pose, RobotState &state) {
+        Eigen::Isometry3d eigen_pose;
+        poseTFToEigen(pose, eigen_pose);
+        return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState *robot_state, const JointModelGroup *joint_group,
+                const double *joint_group_variable_values){
+            return true;
+        });
+    }
+};
+
+double getFullTranslation(RobotState &state, RobotState &next_state, string link_name) {
+    auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
+    Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+
+    auto state_transform = state.getGlobalLinkTransform(link_name);
+    auto next_state_transform = next_state.getGlobalLinkTransform(link_name);
+    Eigen::Quaterniond start_quaternion(state_transform.rotation());
+    Eigen::Quaterniond target_quaternion(next_state_transform.rotation());
+    //Use shortestAngle in tf
     double sin_between_quaternions = sin(start_quaternion.angularDistance(target_quaternion));
     double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
 
@@ -107,19 +161,96 @@ double getFullTranslation(const RobotStatePtr state, const RobotStatePtr next_st
     return (state_transform.translation() - next_state_transform.translation()).norm() + linear_angular_distance;
 }
 
-pair<string, double> getMaxTranslation(const RobotStatePtr state, const RobotStatePtr next_state)
-{
-    pair<string, double> max_pair = make_pair("", 0);
-    for (auto link : state->getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
-        if (getFullTranslation(state, next_state, link->getName()) >= max_pair.second){
-            max_pair.first = link->getName();
-            max_pair.second = getFullTranslation(state, next_state, link->getName());
-        }
-    return max_pair;
+double getMaxTranslation(RobotState &state, RobotState &next_state) {
+    double max_dist = 0;
+    for (auto link_name : state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometryNames())
+        max_dist = max(max_dist, getFullTranslation(state, next_state, link_name));
+    return max_dist;
 }
 
-void checkAllowedCollision(RobotState& state, planning_scene::PlanningScenePtr current_scene)
+template<typename Interpolator, typename IKSolver, typename OutputIterator>
+bool linearInterpolationTemplate(const LinearParams &params, const RobotState &base_state, Interpolator &&interpolator,
+            IKSolver &&solver, size_t steps, OutputIterator &&out)
 {
+    RobotState current(base_state);
+    *out++ = current;
+    Transform pose;
+    for (size_t i = 1; i <= steps; ++i) {
+        double percentage = (double) i / (double) steps;
+        interpolator.interpolateByPercentage(percentage, pose, current);
+        if (!solver.setStateFromIK(params, pose, current)){
+            return false;
+        }
+        *out++ = current;
+    }
+    return true;
+}
+
+template<typename OutputIterator, typename Interpolator, typename IKSolver>
+size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
+                               RobotState left, RobotState right) {
+    size_t segments;
+    double percentage = 1;
+    Transform mid_pose;
+    RobotState mid(right);
+    deque<RobotState> state_stack;
+    vector<RobotState> buffer;
+    state_stack.push_back(mid);
+    while (!state_stack.empty()) {
+        right = state_stack.back();
+        interpolator.interpolateByPercentage(percentage, mid_pose, left);
+        if (!solver.setStateFromIK(params, mid_pose, mid)){
+            throw runtime_error("Invalid trajectory!");
+        }
+        if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION){
+            percentage *= 0.5;
+            state_stack.push_back(mid);
+        }
+        else {
+            percentage /= 0.5;
+            buffer.push_back(mid);
+            state_stack.pop_back();
+            left = mid;
+        }
+    }
+    copy(buffer.begin(), buffer.end(), out);
+    segments = buffer.size();
+    return segments;
+}
+
+template<typename Interpolator, typename IKSolver>
+bool checkJumpTemplate(const LinearParams &params, Interpolator &&interpolator, IKSolver &&solver,
+                       RobotState left, RobotState right) {
+    Transform mid_pose;
+    RobotState mid(left);
+    auto dist = left.distance(right);
+    double offset = 0;
+    double part = 1;
+    while (part >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
+        part *= 0.5;
+        interpolator.interpolateByPercentage(0.5 + offset, mid_pose, mid);
+        if (!solver.setStateFromIK(params, mid_pose, mid)){
+            throw runtime_error("Invalid trajectory!");
+        }
+        auto lm = left.distance(mid);
+        auto mr = mid.distance(right);
+        if (lm < mr) {
+            offset += part;
+            left = mid;
+            dist = mid.distance(right);
+        } else {
+            offset -= part;
+            right = mid;
+            dist = left.distance(mid);
+        }
+    }
+    if (part < 0.00005)
+        return false;
+
+    return true;
+}
+
+void checkAllowedCollision(RobotState &state, planning_scene::PlanningScenePtr current_scene) {
     collision_detection::CollisionRequest req;
     collision_detection::CollisionResult res;
     current_scene->checkCollision(req, res, state);
@@ -134,59 +265,18 @@ void checkAllowedCollision(RobotState& state, planning_scene::PlanningScenePtr c
         double contact_depth = contact_vector[0].depth;
         if (contact_depth > ALLOWED_COLLISION_DEPTH)
             throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
-    }
-    else
+    } else
         throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
 }
 
-void checkJump(list<RobotStatePtr> trajectory)
-{
-    for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it){
-        auto right = *next(state_it);
-        auto left = *state_it;
-        auto dist = right->distance(*left);
-
-        while (dist > CONTINUITY_CHECK_THRESHOLD){
-            auto mid = getMiddleState(*right, *left);
-            if (!mid)
-                throw runtime_error("Space jump happened!\nInvalid trajectory!");
-            dist /= 2;
-            auto lm = left->distance(*mid);
-            auto mr = mid->distance(*right);
-            (lm > mr) ? right = mid : left = mid;
-        }
-        if (right->distance(*left) >= CONTINUITY_CHECK_THRESHOLD + DISTANCE_TOLERANCE)
-            throw runtime_error("Space jump happened!\nInvalid trajectory!");
-    }
-}
-
-
-void splitTrajectorySegment(list<RobotStatePtr>& trail, double critical_distance)
-{
-    for (auto state_it = trail.begin(); state_it != prev(trail.end()); ++state_it){
-        auto translation_pair = getMaxTranslation(*state_it, *next(state_it));
-
-        while (translation_pair.second > critical_distance) {
-            auto mid_state = getMiddleState(**state_it, **next(state_it));
-            if (mid_state) {
-                auto insert_it = inserter(trail, next(state_it));
-                insert_it = mid_state;
-                translation_pair.second = getFullTranslation(*state_it, *next(state_it), translation_pair.first);
-            } else
-                throw runtime_error("Space jump happened!\nInvalid trajectory!");
-        }
-    }
-}
-
-void checkCollision(list<RobotStatePtr> trajectory, planning_scene::PlanningScenePtr current_scene)
-{
-    for (auto state_it = next(trajectory.begin()); state_it != prev(trajectory.end()); ++state_it){
-        if (current_scene->isStateColliding(**state_it, PLANNING_GROUP, true))
+void checkCollision(list<RobotState> trajectory, planning_scene::PlanningScenePtr current_scene) {
+    for (auto state_it = next(trajectory.begin()); state_it != prev(trajectory.end()); ++state_it) {
+        if (current_scene->isStateColliding(*state_it, PLANNING_GROUP, true))
             throw runtime_error("Collision during the trajectory processing!\nInvalid trajectory!");
     }
 }
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     //Initialization
     ros::init(argc, argv, "kinematics_test");
@@ -194,7 +284,7 @@ int main(int argc, char** argv)
     ros::AsyncSpinner spinner(1);
     spinner.start();
 
-    moveit::planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
+    planning_interface::MoveGroupInterface move_group(PLANNING_GROUP);
 
     robot_model_loader::RobotModelLoader kt_robot_model_loader(DEFAULT_ROBOT_DESCRIPTION);
     robot_model::RobotModelConstPtr kt_kinematic_model = kt_robot_model_loader.getModel();
@@ -204,7 +294,7 @@ int main(int argc, char** argv)
     ROS_INFO("Model frame: %s", kt_kinematic_model->getModelFrame().c_str());
 
     kt_kinematic_state.setToDefaultValues();
-    const JointModelGroup* joint_model_group_ptr = kt_kinematic_model->getJointModelGroup(PLANNING_GROUP);
+    const JointModelGroup *joint_model_group_ptr = kt_kinematic_model->getJointModelGroup(PLANNING_GROUP);
 
     moveit_visual_tools::MoveItVisualTools visual_tools(kt_kinematic_model->getModelFrame());
     namespace rvt = rviz_visual_tools;
@@ -212,29 +302,41 @@ int main(int argc, char** argv)
     visual_tools.loadRemoteControl();
     //end of initialization
 
-    tf::Transform tf_start(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(1.085, 0.0, 1.565));
-    tf::Transform tf_goal(tf::createQuaternionFromRPY(0, M_PI * 0.6, 0), tf::Vector3(1.085, 0.0, 1.565));
-    Affine3d goal_transform;
-    Affine3d start_transform;
-
-    tf::transformTFToEigen(tf_start, start_transform);
-    tf::transformTFToEigen(tf_goal, goal_transform);
+    Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
+    Transform tf_goal(createQuaternionFromRPY(0, M_PI_2 * 0.7, 0), Vector3(1.185, 0, 1.565));
+    Eigen::Isometry3d start_transform;
+    Eigen::Isometry3d goal_transform;
+    transformTFToEigen(tf_goal, goal_transform);
+    transformTFToEigen(tf_start, start_transform);
 
     //Check first and last state on allowed collision
+//    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
+//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+//    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
+//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+
     kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+    RobotState goal_state(kt_kinematic_state);
     kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
-    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+    RobotState start_state(kt_kinematic_state);
 
-    list<RobotStatePtr> trajectory;
-    size_t approximate_steps = floor((goal_transform.translation() - start_transform.translation()).norm() /
-                                     STANDARD_INTERPOLATION_STEP);
-    bool is_interpolated = linearInterpolation(trajectory, kt_kinematic_state, goal_transform, approximate_steps);
+    list<RobotState> trajectory;
+    LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR),
+                           STANDARD_INTERPOLATION_STEP};
+    size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
+    linearInterpolationTemplate(params, start_state, PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state), TestIKSolver(),
+            approximate_steps, back_inserter(trajectory));
 
-    if (is_interpolated){
-        thread check_collision_thread(checkCollision, trajectory, kt_planning_scene);
-        checkJump(trajectory);
-        splitTrajectorySegment(trajectory, EXPERIMENTAL_DISTANCE_CONSTRAINT);
-        check_collision_thread.join();
+    for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
+        poseEigenToTF(state_it->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_start);
+        poseEigenToTF(next(state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_goal);
+        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
+            if (!checkJumpTemplate(params,PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)),
+                    TestIKSolver(), *state_it, *next(state_it)))
+                throw runtime_error("Invalid trajectory!");
+            advance(state_it,splitTrajectoryTemplate(inserter(trajectory, next(state_it)),
+                    PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), params, *state_it, *next(state_it)));
+        }
     }
+    checkCollision(trajectory, kt_planning_scene);
 }
