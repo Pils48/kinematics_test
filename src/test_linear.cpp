@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iterator>
 
+
 #include <math.h>
 #include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
@@ -22,6 +23,7 @@ static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
 static const double LINEAR_TARGET_PRECISION = 0.005;
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
+static const double DISTANCE_TOLERANCE = 0.0001; //Random
 
 using namespace std;
 using namespace moveit;
@@ -129,6 +131,8 @@ public:
     }
 };
 
+double getMaxTranslation(const Transform &start_pose, const Transform &end_pose);
+
 double getFullTranslation(RobotState &state, RobotState &next_state, string link_name)
 {
     auto link_mesh_ptr = state.getLinkModel(link_name)->getShapes()[0].get();
@@ -173,12 +177,13 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
     return true;
 }
 
+//Implement getMidState
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
 size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
                                 RobotState left, RobotState right)
 {
     size_t segments;
-    double percentage = 1;
+    double percentage = 0.5;
     Transform mid_pose;
     RobotState mid(right);
     deque<RobotState> state_stack;
@@ -195,7 +200,7 @@ size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &&interpolator
         }
         else {
             percentage /= 0.5;
-            *out = mid;
+            *out++ = mid;
             segments++;
             state_stack.pop_back();
             left = mid;
@@ -264,13 +269,44 @@ void checkCollision(list<RobotState> trajectory, planning_scene::PlanningScenePt
     }
 }
 
-bool computeCartesianPath(const LinearParams &params,
-        const moveit::core::RobotState &start_state,
-        std::vector<moveit::core::RobotStatePtr>& traj,
-        const std::vector<tf::Transform>& waypoints,
-        const std::vector<moveit::core::RobotState> &base_waypoint_states,
-        double const_step)
+template <typename OutputIterator, typename Interpolator>
+bool computeCartesianPath(
+        const LinearParams &params,
+        const RobotInterpolationState &left,
+        const RobotInterpolationState &right,
+        Interpolator &&interpolator,
+        OutputIterator &&out,
+        double const_step,
+        double distance_constraint)
 {
+    auto start_pose = left.ee_pose; //StartPoseWithOffset
 
+    bool use_const_step = const_step > 0.0;
+
+    if (getMaxTranslation(left.ee_pose, right.ee_pose) < DISTANCE_TOLERANCE)
+    {
+
+    }
+//    if (interpolator.totalDistance() < DISTANCE_TOLERANCE)
+//    {
+//        if (interpolator.totalAngle() < ANGLE_TOLERANCE)
+//        {
+//            bool ok = setStateFromIK(params, target, state);
+//            if (ok && traj.back()->distance(state, params.group) > math::EPS)
+//            {
+//                traj.push_back(std::make_shared<moveit::core::RobotState>(state));
+//                valid_distance = total_distance;
+//            }
+//            return ok;
+//        }
+//        else
+//        {
+//            // throws if something goes wrong
+//            computeRotationOnlyTrajectory(params, state, traj, interpolator);
+//            valid_distance = total_distance;
+//            return true;
+//        }
+//    }
 }
+
 

@@ -14,7 +14,13 @@
 struct LinearParams {
     const moveit::core::JointModelGroup *group;
     const moveit::core::LinkModel *end_effector;
-    const double interpolation_step;
+    const tf::Transform &ee_offset;
+};
+
+struct RobotInterpolationState{
+    tf::Transform ee_pose;
+    moveit::core::RobotState base_state; //base_state for some targets are the same
+    double percentage;
 };
 
 double getFullTranslation(moveit::core::RobotState &state, moveit::core::RobotState &next_state, std::string link_name);

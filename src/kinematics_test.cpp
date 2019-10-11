@@ -7,12 +7,8 @@
 
 #include <list>
 #include <chrono>
-#include <thread>
-#include <iterator>
 
 #include <math.h>
-#include <angles/angles.h>
-#include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
 #include <tf_conversions/tf_eigen.h>
 
