@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(kinematics_test)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-add_compile_options(-std=c++11)
+add_compile_options(-std=c++17)
 
 find_package(Eigen3 REQUIRED)
 
@@ -149,7 +149,7 @@ include_directories(
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(kinematics_test src/kinematics_test.cpp)
+add_executable(kinematics_test src/kinematics_test.cpp include/test_linear.h src/test_linear.cpp)
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the

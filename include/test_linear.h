@@ -102,9 +102,14 @@ struct LinearParams {
 };
 
 struct RobotInterpolationState{
-     const tf::Transform &ee_pose;
-     const moveit::core::RobotState &base_state; //base_state for some targets are the same
+     tf::Transform ee_pose;
+     moveit::core::RobotState base_state; //base_state for some targets are the same
      double percentage;
+
+//     RobotInterpolationState(RobotInterpolationState &&other){
+//         std::swap(this->ee_pose, other.ee_pose);
+//         this->base_state =
+//     }
 };
 
 class TestIKSolver {
@@ -123,7 +128,7 @@ double getFullTranslation(moveit::core::RobotState &state, moveit::core::RobotSt
 
 double getMaxTranslation(moveit::core::RobotState &state, moveit::core::RobotState &next_state);
 
-double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state);
+//double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state);
 
 void checkAllowedCollision(moveit::core::RobotState &state, planning_scene::PlanningScenePtr current_scene);
 
@@ -131,9 +136,9 @@ void checkCollision(std::list<moveit::core::RobotState> trajectory, planning_sce
 
 bool computeCartesianPath(
         const LinearParams &params,
-        const tf::Transform start_pose,
-        const tf::Transform goal_pose,
-        const moveit::core::RobotState &base_state,
+        tf::Transform start_pose,
+        tf::Transform goal_pose,
+        moveit::core::RobotState &base_state,
         std::vector<RobotInterpolationState> &traj,
         double const_step);
 

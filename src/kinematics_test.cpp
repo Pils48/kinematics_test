@@ -7,6 +7,7 @@
 
 #include <list>
 #include <chrono>
+#include <thread>
 
 #include <math.h>
 #include <Eigen/Geometry>
@@ -55,12 +56,19 @@ int main(int argc, char **argv) {
     //end of initialization
 
     const Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
-    const Transform tf_goal(createQuaternionFromRPY(0, M_PI_2 * 0.7, 0), Vector3(1.185, 0, 1.565));
-
-    const RobotInterpolationState start_state = {tf_start, kt_kinematic_state, 0};
-    const RobotInterpolationState goal_state = {tf_goal, kt_kinematic_state, 1};
+    const Transform tf_goal(createQuaternionFromRPY(0, M_PI_4, 0), Vector3(1.086, 0, 1.565));
 
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), Transform::getIdentity()};
     vector<RobotInterpolationState> trajectory;
     bool ok = computeCartesianPath(params, tf_start, tf_goal, kt_kinematic_state, trajectory, STANDARD_INTERPOLATION_STEP);
+
+    for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
+        this_thread::sleep_for(chrono::milliseconds(10));
+        Eigen::Isometry3d e_t;
+        transformTFToEigen(it->ee_pose, e_t);
+        kt_kinematic_state.setFromIK(joint_model_group_ptr, e_t);
+        visual_tools.publishRobotState(kt_kinematic_state, rvt::BLUE);
+        this_thread::sleep_for(chrono::milliseconds(10));
+        visual_tools.deleteAllMarkers();
+    }
 }
