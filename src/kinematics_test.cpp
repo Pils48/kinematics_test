@@ -19,14 +19,17 @@
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
 #include "../include/test_linear.h"
+//#include "../src/test_linear.cpp"
 
 using namespace std;
 using namespace moveit;
 using namespace core;
 using namespace tf;
 
-int main(int argc, char **argv)
-{
+static const double STANDARD_INTERPOLATION_STEP = 0.01;
+static const double LINEAR_TARGET_PRECISION = 0.005;
+
+int main(int argc, char **argv) {
     //Initialization
     ros::init(argc, argv, "kinematics_test");
     ros::NodeHandle node_handle;
@@ -51,41 +54,13 @@ int main(int argc, char **argv)
     visual_tools.loadRemoteControl();
     //end of initialization
 
-    Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
-    Transform tf_goal(createQuaternionFromRPY(0, M_PI_2 * 0.7, 0), Vector3(1.185, 0, 1.565));
-    Eigen::Isometry3d start_transform;
-    Eigen::Isometry3d goal_transform;
-    transformTFToEigen(tf_goal, goal_transform);
-    transformTFToEigen(tf_start, start_transform);
+    const Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
+    const Transform tf_goal(createQuaternionFromRPY(0, M_PI_2 * 0.7, 0), Vector3(1.185, 0, 1.565));
 
-    //Check first and last state on allowed collision
-//    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
-//    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
-//    checkAllowedCollision(kt_kinematic_state, kt_planning_scene);
+    const RobotInterpolationState start_state = {tf_start, kt_kinematic_state, 0};
+    const RobotInterpolationState goal_state = {tf_goal, kt_kinematic_state, 1};
 
-//    kt_kinematic_state.setFromIK(joint_model_group_ptr, goal_transform);
-//    RobotState goal_state(kt_kinematic_state);
-//    kt_kinematic_state.setFromIK(joint_model_group_ptr, start_transform);
-//    RobotState start_state(kt_kinematic_state);
-//
-//    list<RobotState> trajectory;
-//    LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR),
-//                           STANDARD_INTERPOLATION_STEP};
-//    size_t approximate_steps = floor(getMaxTranslation(start_state, goal_state) / STANDARD_INTERPOLATION_STEP);
-//    linearInterpolationTemplate(params, start_state, PoseAndStateInterpolator(tf_start, tf_goal, start_state, goal_state), TestIKSolver(),
-//            approximate_steps, back_inserter(trajectory));
-//
-//    for (auto state_it = trajectory.begin(); state_it != prev(trajectory.end()); ++state_it) {
-//        poseEigenToTF(state_it->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_start);
-//        poseEigenToTF(next(state_it)->getGlobalLinkTransform(FANUC_M20IA_END_EFFECTOR), tf_goal);
-//        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-//            if (!checkJumpTemplate(params,PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)),
-//                    TestIKSolver(), *state_it, *next(state_it)))
-//                throw runtime_error("Invalid trajectory!");
-//            advance(state_it,splitTrajectoryTemplate(inserter(trajectory, next(state_it)),
-//                    PoseAndStateInterpolator(tf_start, tf_goal, *state_it, *next(state_it)), TestIKSolver(), params, *state_it, *next(state_it)));
-//        }
-//    }
-//    checkCollision(trajectory, kt_planning_scene);
+    LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), Transform::getIdentity()};
+    vector<RobotInterpolationState> trajectory;
+    bool ok = computeCartesianPath(params, tf_start, tf_goal, kt_kinematic_state, trajectory, STANDARD_INTERPOLATION_STEP);
 }

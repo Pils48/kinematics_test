@@ -8,12 +8,10 @@
 
 
 #include <math.h>
-#include <angles/angles.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
 #include <tf_conversions/tf_eigen.h>
 
-#include <moveit/robot_model/robot_model.h>
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
@@ -21,8 +19,6 @@
 
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
-static const double LINEAR_TARGET_PRECISION = 0.005;
-static const double STANDARD_INTERPOLATION_STEP = 0.01;
 static const double DISTANCE_TOLERANCE = 0.0001; //Random
 
 using namespace std;
@@ -30,108 +26,8 @@ using namespace moveit;
 using namespace core;
 using namespace tf;
 
-struct RobotPosition {
-    const RobotState &base_state;
-    Transform &robot_pose;
-};
-
-class TransformSlerper {
-public:
-    TransformSlerper(const Transform &source, const Transform &target)
-            : source(source), target(target), source_rotation(source.getRotation()),
-              target_rotation(target.getRotation()), total_distance(target.getOrigin().distance(source.getOrigin())),
-              total_angle(source_rotation.angleShortestPath(target_rotation)) {}
-
-    Transform slerpByPercentage(double percentage) const {
-        return Transform(
-                source_rotation.slerp(target_rotation, percentage),
-                percentage * target.getOrigin() + (1 - percentage) * source.getOrigin()
-        );
-    }
-
-    Transform slerpByDistance(double distance) const {
-        if (total_distance < numeric_limits<double>::epsilon())
-            return source;
-        return slerpByPercentage(distance / total_distance);
-    }
-
-    Transform slerpByAngle(double angle) const {
-        if (total_angle < numeric_limits<double>::epsilon())
-            return source;
-        return slerpByPercentage(angle / total_angle);
-    }
-
-    double totalDistance() const {
-        return total_distance;
-    }
-
-    double totalAngle() const {
-        return total_angle;
-    }
-
-private:
-    const Transform source;
-    const Transform target;
-    Quaternion source_rotation, target_rotation;
-    double total_distance;
-    double total_angle;
-};
-
-class PoseAndStateInterpolator {
-public:
-    PoseAndStateInterpolator(
-            const Transform &source,
-            const Transform &target,
-            const RobotState &start_state,
-            const RobotState &end_state
-    ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
-    }
-
-    void interpolateByPercentage(double percentage, Transform &pose, RobotState &state) {
-        pose = _slerper.slerpByPercentage(percentage);
-        _start_state.interpolate(_end_state, percentage, state);
-        state.update();
-    }
-
-    void interpolateByDistance(double distance, Transform &pose, RobotState &state) const {
-        pose = _slerper.slerpByDistance(distance);
-        _start_state.interpolate(_end_state, distance / totalDistance(), state);
-        state.update();
-    }
-
-    void interpolateByAngle(double angle, Transform &pose, RobotState &state) const {
-        pose = _slerper.slerpByAngle(angle);
-        _start_state.interpolate(_end_state, angle / totalAngle(), state);
-        state.update();
-    }
-
-    double totalDistance() const {
-        return _slerper.totalDistance();
-    }
-
-    double totalAngle() const {
-        return _slerper.totalAngle();
-    }
-
-private:
-    TransformSlerper _slerper;
-    const RobotState &_start_state;
-    const RobotState &_end_state;
-};
-
-class TestIKSolver {
-public:
-    bool setStateFromIK(const LinearParams &params, Transform &pose, RobotState &state) {
-        Eigen::Isometry3d eigen_pose;
-        poseTFToEigen(pose, eigen_pose);
-        return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState *robot_state, const JointModelGroup *joint_group,
-                                                                 const double *joint_group_variable_values){
-            return true;
-        });
-    }
-};
-
-double getMaxTranslation(const Transform &start_pose, const Transform &end_pose);
+static const double STANDARD_INTERPOLATION_STEP = 0.01;
+static const double LINEAR_TARGET_PRECISION = 0.005;
 
 double getFullTranslation(RobotState &state, RobotState &next_state, string link_name)
 {
@@ -159,87 +55,89 @@ double getMaxTranslation(RobotState &state, RobotState &next_state)
     return max_dist;
 }
 
+double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state)
+{
+    return 0;
+}
+
 template<typename Interpolator, typename IKSolver, typename OutputIterator>
 bool linearInterpolationTemplate(const LinearParams &params, const RobotState &base_state, Interpolator &&interpolator,
                                  IKSolver &&solver, size_t steps, OutputIterator &&out)
 {
-    RobotState current(base_state);
-    *out++ = current;
     Transform pose;
+    RobotState current(base_state);
+    double percentage = 0;
+    interpolator.interpolateByPercentage(percentage, pose, current);
+    *out++ = {pose, base_state, 0};
     for (size_t i = 1; i <= steps; ++i) {
-        double percentage = (double) i / (double) steps;
+        percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
-        if (!solver.setStateFromIK(params, pose, current)){
-            return false;
-        }
-        *out++ = current;
+        *out++ = {pose, base_state, percentage};
     }
     return true;
 }
 
-//Implement getMidState
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &&interpolator, IKSolver &&solver, const LinearParams &params,
-                                RobotState left, RobotState right)
+size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
+                                RobotInterpolationState left, RobotInterpolationState right)
 {
     size_t segments;
-    double percentage = 0.5;
     Transform mid_pose;
-    RobotState mid(right);
-    deque<RobotState> state_stack;
-    state_stack.push_back(mid);
+    RobotState mid(right.base_state);
+    RobotInterpolationState mid_inter_state(right); //skin copy????
+    deque<RobotInterpolationState> state_stack;
+    state_stack.push_back(right);
     while (!state_stack.empty()) {
-        right = state_stack.back();
-        interpolator.interpolateByPercentage(percentage, mid_pose, left);
+//        right = state_stack.back();
+        interpolator.interpolateByPercentage((right.percentage + left.percentage) * 0.5, mid_pose, left);
         if (!solver.setStateFromIK(params, mid_pose, mid)){
             throw runtime_error("Invalid trajectory!");
         }
         if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION){
-            percentage *= 0.5;
-            state_stack.push_back(mid);
+            mid_inter_state.percentage = (right.percentage + left.percentage) * 0.5;
+            state_stack.push_back(mid_inter_state);
         }
         else {
-            percentage /= 0.5;
             *out++ = mid;
             segments++;
             state_stack.pop_back();
-            left = mid;
+//            left = mid_inter_state;
         }
     }
     return segments;
 }
 
-template<typename Interpolator, typename IKSolver>
-bool checkJumpTemplate(const LinearParams &params, Interpolator &&interpolator, IKSolver &&solver, RobotState left, RobotState right)
-{
-    Transform mid_pose;
-    RobotState mid(left);
-    auto dist = left.distance(right);
-    double offset = 0;
-    double part = 1;
-    while (part >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
-        part *= 0.5;
-        interpolator.interpolateByPercentage(0.5 + offset, mid_pose, mid);
-        if (!solver.setStateFromIK(params, mid_pose, mid)){
-            throw runtime_error("Invalid trajectory!");
-        }
-        auto lm = left.distance(mid);
-        auto mr = mid.distance(right);
-        if (lm < mr) {
-            offset += part;
-            left = mid;
-            dist = mid.distance(right);
-        } else {
-            offset -= part;
-            right = mid;
-            dist = left.distance(mid);
-        }
-    }
-    if (part < 0.00005)
-        return false;
-
-    return true;
-}
+//template<typename Interpolator, typename IKSolver>
+//bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver, RobotInterpolationState left, RobotInterpolationState right)
+//{
+//    Transform mid_pose;
+//    RobotState mid(left.base_state);
+//    auto dist = left.distance(right);
+//    double offset = 0;
+//    double part = 1;
+//    while (part >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
+//        part *= 0.5;
+//        interpolator.interpolateByPercentage(0.5 + offset, mid_pose, mid);
+//        if (!solver.setStateFromIK(params, mid_pose, mid)){
+//            throw runtime_error("Invalid trajectory!");
+//        }
+//        auto lm = left.distance(mid);
+//        auto mr = mid.distance(right);
+//        if (lm < mr) {
+//            offset += part;
+//            left = mid;
+//            dist = mid.distance(right);
+//        } else {
+//            offset -= part;
+//            right = mid;
+//            dist = left.distance(mid);
+//        }
+//    }
+//    if (part < 0.00005)
+//        return false;
+//
+//    return true;
+//}
 
 void checkAllowedCollision(RobotState &state, planning_scene::PlanningScenePtr current_scene)
 {
@@ -269,44 +167,58 @@ void checkCollision(list<RobotState> trajectory, planning_scene::PlanningScenePt
     }
 }
 
-template <typename OutputIterator, typename Interpolator>
+template <typename Interpolator, typename IKSolver>
 bool computeCartesianPath(
         const LinearParams &params,
-        const RobotInterpolationState &left,
-        const RobotInterpolationState &right,
-        Interpolator &&interpolator,
-        OutputIterator &&out,
+        const RobotInterpolationState &left_state,
+        const RobotInterpolationState &right_state,
+        vector<RobotInterpolationState> &traj,
+        IKSolver &&solver,
         double const_step,
         double distance_constraint)
 {
-    auto start_pose = left.ee_pose; //StartPoseWithOffset
+    RobotState start_state(left_state.base_state);
 
     bool use_const_step = const_step > 0.0;
 
-    if (getMaxTranslation(left.ee_pose, right.ee_pose) < DISTANCE_TOLERANCE)
-    {
+    Interpolator interpolator(left_state.ee_pose, right_state.ee_pose, left_state.base_state, right_state.base_state);
 
+    if (solver.setStateFromIK(params, left_state.ee_pose, start_state)){//что делает эта проверка
+        traj.push_back(left_state);
     }
-//    if (interpolator.totalDistance() < DISTANCE_TOLERANCE)
-//    {
-//        if (interpolator.totalAngle() < ANGLE_TOLERANCE)
-//        {
-//            bool ok = setStateFromIK(params, target, state);
-//            if (ok && traj.back()->distance(state, params.group) > math::EPS)
-//            {
-//                traj.push_back(std::make_shared<moveit::core::RobotState>(state));
-//                valid_distance = total_distance;
-//            }
-//            return ok;
-//        }
-//        else
-//        {
-//            // throws if something goes wrong
-//            computeRotationOnlyTrajectory(params, state, traj, interpolator);
-//            valid_distance = total_distance;
-//            return true;
+
+    //Проверка траектории на малость
+    //NOP
+
+    //Интерполяция, добавить исключительные ситуации
+    size_t approximate_steps = floor(getMaxTranslation(left_state, right_state) / const_step);
+    linearInterpolationTemplate(params, start_state, interpolator, TestIKSolver(), approximate_steps, back_inserter(traj));
+
+    //Сегментация траектории
+//    for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
+//        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
+//            if (!checkJumpTemplate(params,  interpolator), TestIKSolver(), *state_it, *next(state_it))
+//                throw runtime_error("Invalid trajectory!");
+//            advance(state_it, splitTrajectoryTemplate(inserter(traj, next(state_it)), interpolator, TestIKSolver(), params, *state_it, *next(state_it)));
 //        }
 //    }
+    return true;
+}
+
+bool computeCartesianPath(
+        const LinearParams &params,
+        const Transform start_pose,
+        const Transform goal_pose,
+        const RobotState &base_state,
+        vector<RobotInterpolationState> &traj,
+        double const_step)
+{
+    const RobotInterpolationState start_state = {start_pose, base_state, 0};
+    const RobotInterpolationState goal_state = {goal_pose, base_state, 1};
+
+    vector<RobotInterpolationState> wp_traj;
+    if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, wp_traj, TestIKSolver(), STANDARD_INTERPOLATION_STEP, LINEAR_TARGET_PRECISION))
+        throw runtime_error("Invalid trajectory!");
 }
 
 
