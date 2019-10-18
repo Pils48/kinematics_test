@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
     //end of initialization
 
     const Transform tf_start(createQuaternionFromRPY(0, 0, 0), Vector3(1.085, 0, 1.565));
-    const Transform tf_goal(createQuaternionFromRPY(0, M_PI_4, 0), Vector3(1.086, 0, 1.565));
+    const Transform tf_goal(createQuaternionFromRPY(0, 0, 0), Vector3(1.285, 0, 1.565));
 
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), Transform::getIdentity()};
     vector<RobotInterpolationState> trajectory;

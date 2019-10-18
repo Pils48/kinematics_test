@@ -71,26 +71,19 @@ double getMaxTranslation(RobotState &state, RobotState &next_state)
 
 double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state)
 {
-//    RobotState start_state(next_state.base_state);
-//    RobotState goal_state(next_state.base_state);
-//    Eigen::Isometry3d start_transform;
-//    Eigen::Isometry3d goal_transform;
-//    tf::transformTFToEigen(state.ee_pose, start_transform);
-//    tf::transformTFToEigen(next_state.ee_pose, goal_transform);
-//    start_state.setFromIK(next_state.base_state.getJointModelGroup(PLANNING_GROUP), start_transform);
-//    goal_state.setFromIK(next_state.base_state.getJointModelGroup(PLANNING_GROUP), goal_transform);
-    return getFullTranslation(state.ee_pose, next_state.ee_pose, next_state.base_state.getLinkModel("link_2"));
+    double max_dist = 0;
+    for (auto link : state.base_state.getJointModelGroup(PLANNING_GROUP)->getUpdatedLinkModelsWithGeometry())
+        max_dist = max(max_dist, getFullTranslation(state.ee_pose, next_state.ee_pose, link));
+    return max_dist;
 }
 
 template<typename Interpolator, typename IKSolver, typename OutputIterator>
-bool linearInterpolationTemplate(const LinearParams &params, const RobotState &base_state, Interpolator &&interpolator,
+bool linearInterpolationTemplate(const LinearParams &params, const RobotState &base_state, Interpolator &interpolator,
                                  IKSolver &&solver, size_t steps, OutputIterator &&out)
 {
     Transform pose;
     RobotState current(base_state);
     double percentage = 0;
-    interpolator.interpolateByPercentage(percentage, pose, current);
-    *out++ = {pose, base_state, 0};
     for (size_t i = 1; i <= steps; ++i) {
         percentage = (double) i / (double) steps;
         interpolator.interpolateByPercentage(percentage, pose, current);
@@ -103,26 +96,27 @@ template<typename OutputIterator, typename Interpolator, typename IKSolver>
 size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
                                 RobotInterpolationState left, RobotInterpolationState right)
 {
-    size_t segments;
+    size_t segments = 0;
     Transform mid_pose;
     RobotInterpolationState mid_inter_state(right);
-    deque<RobotInterpolationState> state_stack;
-    state_stack.push_back(right);
+    deque<RobotInterpolationState> state_stack(1, right);
     while (!state_stack.empty()) {
         right = state_stack.back();
         interpolator.interpolateByPercentage((right.percentage + left.percentage) * 0.5, mid_pose, left.base_state);
-        if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION){
-            mid_inter_state.percentage = (right.percentage + left.percentage) * 0.5;
-            mid_inter_state.ee_pose = mid_pose;
+        mid_inter_state.percentage = (right.percentage + left.percentage) * 0.5;
+        mid_inter_state.ee_pose = mid_pose;
+        if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION) {
             state_stack.push_back(mid_inter_state);
-        }
-        else {
-            *out++ = mid_inter_state;
+        } else {
+            //пушим лишнее
+            if (state_stack.size() != 1)
+                *out++ = mid_inter_state;
             segments++;
             state_stack.pop_back();
             left = mid_inter_state;
         }
     }
+//    ROS_WARN("Segments : %d", segments);
     return segments;
 }
 
@@ -139,28 +133,28 @@ bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, I
     RobotState right(right_state.base_state);
     right.setFromIK(params.group, right_transform);
     RobotState mid(left_state.base_state);
+
     auto dist = left.distance(right);
     double offset = 0;
-    double part = 1;
-    while (part >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
-        part *= 0.5;
-        interpolator.interpolateByPercentage(0.5 + offset, mid_pose, mid);
-        if (!solver.setStateFromIK(params, mid_pose, mid)){
+    double percentage = 1;
+    while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
+        percentage *= 0.5;
+        interpolator.interpolateByPercentage(percentage + offset, mid_pose, mid);
+        if (!solver.setStateFromIK(params, mid_pose, mid))
             throw runtime_error("Invalid trajectory!");
-        }
         auto lm = left.distance(mid);
         auto mr = mid.distance(right);
         if (lm < mr) {
-            offset += part;
+            offset += percentage;
             left = mid;
             dist = mid.distance(right);
         } else {
-            offset -= part;
+            offset = (offset - percentage) > 0 ? offset - percentage : 0;
             right = mid;
             dist = left.distance(mid);
         }
     }
-    if (part < 0.00005)
+    if (percentage < 0.00005)
         return false;
 
     return true;
@@ -222,13 +216,16 @@ bool computeCartesianPath(
     linearInterpolationTemplate(params, start_state, interpolator, TestIKSolver(), approximate_steps, back_inserter(traj));
 
     //Сегментация траектории
-//    for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
-//        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-////            if (!checkJumpTemplate(params,  interpolator), TestIKSolver(), *state_it, *next(state_it))
-////                throw runtime_error("Invalid trajectory!");
-//            advance(state_it, splitTrajectoryTemplate(inserter(traj, next(state_it)), interpolator, TestIKSolver(), params, *state_it, *next(state_it)));
-//        }
-//    }
+    for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
+        if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
+            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
+                throw runtime_error("Invalid trajectory!");
+//            advance(state_it, splitTrajectoryTemplate(inserter(traj, state_it), interpolator,
+//                    TestIKSolver(), params, *state_it, *next(state_it)));
+//                splitTrajectoryTemplate(inserter(traj, state_it), interpolator,
+//                    TestIKSolver(), params, *state_it, *next(state_it));
+        }
+    }
     return true;
 }
 
@@ -244,7 +241,7 @@ bool computeCartesianPath(
     const RobotInterpolationState goal_state = {goal_pose, base_state, 1};
 
     vector<RobotInterpolationState> wp_traj;
-    if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, traj, TestIKSolver(), STANDARD_INTERPOLATION_STEP, LINEAR_TARGET_PRECISION))
+    if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, wp_traj, TestIKSolver(), STANDARD_INTERPOLATION_STEP, LINEAR_TARGET_PRECISION))
         throw runtime_error("Invalid trajectory!");
 }
 

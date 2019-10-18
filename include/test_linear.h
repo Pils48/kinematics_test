@@ -106,10 +106,7 @@ struct RobotInterpolationState{
      moveit::core::RobotState base_state; //base_state for some targets are the same
      double percentage;
 
-//     RobotInterpolationState(RobotInterpolationState &&other){
-//         std::swap(this->ee_pose, other.ee_pose);
-//         this->base_state =
-//     }
+     RobotInterpolationState(const RobotInterpolationState &other) = default;
 };
 
 class TestIKSolver {
