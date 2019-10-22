@@ -6,7 +6,6 @@
 #include <chrono>
 #include <iterator>
 
-
 #include <math.h>
 #include <geometric_shapes/shape_operations.h>
 #include <Eigen/Geometry>
@@ -20,11 +19,6 @@
 static constexpr double CONTINUITY_CHECK_THRESHOLD = M_PI * 0.001;
 static const double ALLOWED_COLLISION_DEPTH = 0.0000001;
 static const double DISTANCE_TOLERANCE = 0.0001; //Random
-
-using namespace std;
-using namespace moveit;
-using namespace core;
-using namespace tf;
 
 static const double STANDARD_INTERPOLATION_STEP = 0.01;
 static const double LINEAR_TARGET_PRECISION = 0.005;
@@ -108,16 +102,14 @@ size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator,
         if (getMaxTranslation(left, right) >= LINEAR_TARGET_PRECISION) {
             state_stack.push_back(mid_inter_state);
         } else {
-            //пушим лишнее
             if (state_stack.size() != 1)
-                *out++ = mid_inter_state;
+                *out = mid_inter_state;
             segments++;
             state_stack.pop_back();
             left = mid_inter_state;
         }
     }
-//    ROS_WARN("Segments : %d", segments);
-    return segments;
+    return --segments;
 }
 
 template<typename Interpolator, typename IKSolver>
@@ -218,10 +210,10 @@ bool computeCartesianPath(
     //Сегментация траектории
     for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
-                throw runtime_error("Invalid trajectory!");
-//            advance(state_it, splitTrajectoryTemplate(inserter(traj, state_it), interpolator,
-//                    TestIKSolver(), params, *state_it, *next(state_it)));
+//            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
+//                throw runtime_error("Invalid trajectory!");
+            advance(state_it, splitTrajectoryTemplate(inserter(traj, next(state_it)), interpolator,
+                    TestIKSolver(), params, *state_it, *next(state_it)));
 //                splitTrajectoryTemplate(inserter(traj, state_it), interpolator,
 //                    TestIKSolver(), params, *state_it, *next(state_it));
         }
@@ -240,8 +232,9 @@ bool computeCartesianPath(
     const RobotInterpolationState start_state = {start_pose, base_state, 0};
     const RobotInterpolationState goal_state = {goal_pose, base_state, 1};
 
-    vector<RobotInterpolationState> wp_traj;
-    if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, wp_traj, TestIKSolver(), STANDARD_INTERPOLATION_STEP, LINEAR_TARGET_PRECISION))
+    vector<RobotInterpolationState, allocator<RobotInterpolationState> > wp_traj;
+    if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, traj, TestIKSolver(),
+            const_step, LINEAR_TARGET_PRECISION))
         throw runtime_error("Invalid trajectory!");
 }
 

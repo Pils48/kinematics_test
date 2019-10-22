@@ -11,28 +11,33 @@
 #define DEFAULT_ROBOT_DESCRIPTION "robot_description"
 #define PLANNING_GROUP "manipulator"
 
+using namespace std;
+using namespace moveit;
+using namespace core;
+using namespace tf;
+
 class TransformSlerper {
 public:
-    TransformSlerper(const tf::Transform &source, const tf::Transform &target)
+    TransformSlerper(const Transform &source, const Transform &target)
             : source(source), target(target), source_rotation(source.getRotation()),
               target_rotation(target.getRotation()), total_distance(target.getOrigin().distance(source.getOrigin())),
               total_angle(source_rotation.angleShortestPath(target_rotation)) {}
 
-    tf::Transform slerpByPercentage(double percentage) const {
-        return tf::Transform(
+    Transform slerpByPercentage(double percentage) const {
+        return Transform(
                 source_rotation.slerp(target_rotation, percentage),
                 percentage * target.getOrigin() + (1 - percentage) * source.getOrigin()
         );
     }
 
-    tf::Transform slerpByDistance(double distance) const {
-        if (total_distance < std::numeric_limits<double>::epsilon())
+    Transform slerpByDistance(double distance) const {
+        if (total_distance < numeric_limits<double>::epsilon())
             return source;
         return slerpByPercentage(distance / total_distance);
     }
 
-    tf::Transform slerpByAngle(double angle) const {
-        if (total_angle < std::numeric_limits<double>::epsilon())
+    Transform slerpByAngle(double angle) const {
+        if (total_angle < numeric_limits<double>::epsilon())
             return source;
         return slerpByPercentage(angle / total_angle);
     }
@@ -46,9 +51,9 @@ public:
     }
 
 private:
-    const tf::Transform &source;
-    const tf::Transform &target;
-    tf::Quaternion source_rotation, target_rotation;
+    const Transform &source;
+    const Transform &target;
+    Quaternion source_rotation, target_rotation;
     double total_distance;
     double total_angle;
 };
@@ -56,26 +61,26 @@ private:
 class PoseAndStateInterpolator {
 public:
     PoseAndStateInterpolator(
-            const tf::Transform &source,
-            const tf::Transform &target,
-            const moveit::core::RobotState &start_state,
-            const moveit::core::RobotState &end_state
+            const Transform &source,
+            const Transform &target,
+            const RobotState &start_state,
+            const RobotState &end_state
     ) : _slerper(source, target), _start_state(start_state), _end_state(end_state) {
     }
 
-    void interpolateByPercentage(double percentage, tf::Transform &pose, moveit::core::RobotState &state) {
+    void interpolateByPercentage(double percentage, Transform &pose, RobotState &state) {
         pose = _slerper.slerpByPercentage(percentage);
         _start_state.interpolate(_end_state, percentage, state);
         state.update();
     }
 
-    void interpolateByDistance(double distance, tf::Transform &pose, moveit::core::RobotState &state) const {
+    void interpolateByDistance(double distance, Transform &pose, RobotState &state) const {
         pose = _slerper.slerpByDistance(distance);
         _start_state.interpolate(_end_state, distance / totalDistance(), state);
         state.update();
     }
 
-    void interpolateByAngle(double angle, tf::Transform &pose, moveit::core::RobotState &state) const {
+    void interpolateByAngle(double angle, Transform &pose, RobotState &state) const {
         pose = _slerper.slerpByAngle(angle);
         _start_state.interpolate(_end_state, angle / totalAngle(), state);
         state.update();
@@ -91,52 +96,50 @@ public:
 
 private:
     TransformSlerper _slerper;
-    const moveit::core::RobotState &_start_state;
-    const moveit::core::RobotState &_end_state;
+    const RobotState &_start_state;
+    const RobotState &_end_state;
 };
 
 struct LinearParams {
-    const moveit::core::JointModelGroup *group;
-    const moveit::core::LinkModel *end_effector;
-    const tf::Transform &ee_offset;
+    const JointModelGroup *group;
+    const LinkModel *end_effector;
+    const Transform &ee_offset;
 };
 
 struct RobotInterpolationState{
-     tf::Transform ee_pose;
-     moveit::core::RobotState base_state; //base_state for some targets are the same
+     Transform ee_pose;
+     RobotState base_state; //base_state for some targets are the same
      double percentage;
-
-     RobotInterpolationState(const RobotInterpolationState &other) = default;
 };
 
 class TestIKSolver {
 public:
-    bool setStateFromIK(const LinearParams &params, const tf::Transform &pose, moveit::core::RobotState &state) {
+    bool setStateFromIK(const LinearParams &params, const Transform &pose, RobotState &state) {
         Eigen::Isometry3d eigen_pose;
         poseTFToEigen(pose, eigen_pose);
-        return state.setFromIK(params.group, eigen_pose, 0.0, [](moveit::core::RobotState *robot_state, const moveit::core::JointModelGroup *joint_group,
+        return state.setFromIK(params.group, eigen_pose, 0.0, [](RobotState *robot_state, const JointModelGroup *joint_group,
                                                                  const double *joint_group_variable_values){
             return true;
         });
     }
 };
 
-double getFullTranslation(moveit::core::RobotState &state, moveit::core::RobotState &next_state, std::string link_name);
+double getFullTranslation(RobotState &state, RobotState &next_state, string link_name);
 
-double getMaxTranslation(moveit::core::RobotState &state, moveit::core::RobotState &next_state);
+double getMaxTranslation(RobotState &state, RobotState &next_state);
 
 //double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state);
 
-void checkAllowedCollision(moveit::core::RobotState &state, planning_scene::PlanningScenePtr current_scene);
+void checkAllowedCollision(RobotState &state, planning_scene::PlanningScenePtr current_scene);
 
-void checkCollision(std::list<moveit::core::RobotState> trajectory, planning_scene::PlanningScenePtr current_scene);
+void checkCollision(list<RobotState> trajectory, planning_scene::PlanningScenePtr current_scene);
 
 bool computeCartesianPath(
         const LinearParams &params,
-        tf::Transform start_pose,
-        tf::Transform goal_pose,
-        moveit::core::RobotState &base_state,
-        std::vector<RobotInterpolationState> &traj,
+        Transform start_pose,
+        Transform goal_pose,
+        RobotState &base_state,
+        vector<RobotInterpolationState> &traj,
         double const_step);
 
 #endif //KINEMATICS_TEST_TEST_LINEAR_H

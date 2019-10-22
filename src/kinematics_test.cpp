@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
     const Transform tf_goal(createQuaternionFromRPY(0, 0, 0), Vector3(1.285, 0, 1.565));
 
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), Transform::getIdentity()};
-    vector<RobotInterpolationState> trajectory;
+    vector<RobotInterpolationState, allocator<RobotInterpolationState> > trajectory;
     bool ok = computeCartesianPath(params, tf_start, tf_goal, kt_kinematic_state, trajectory, STANDARD_INTERPOLATION_STEP);
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){
