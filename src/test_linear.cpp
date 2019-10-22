@@ -26,8 +26,7 @@ static const double LINEAR_TARGET_PRECISION = 0.005;
 double getFullTranslation(const Transform &left, const Transform &right, const LinkModel* link)
 {
     //Подумать стоит ли добавлять расстояние от оси
-    auto link_mesh_ptr = link->getShapes()[0].get();
-    Eigen::Vector3d link_extends = shapes::computeShapeExtents(link_mesh_ptr);
+    Eigen::Vector3d link_extends = shapes::computeShapeExtents(link->getShapes()[0].get());
 
     double sin_between_quaternions = sin(left.getRotation().angleShortestPath(right.getRotation()));
     double diagonal_length = sqrt(pow(link_extends[0], 2) + pow(link_extends[1], 2) + pow(link_extends[2], 2));
@@ -87,13 +86,14 @@ bool linearInterpolationTemplate(const LinearParams &params, const RobotState &b
 }
 
 template<typename OutputIterator, typename Interpolator, typename IKSolver>
-size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
+bool splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator, IKSolver &&solver, const LinearParams &params,
                                 RobotInterpolationState left, RobotInterpolationState right)
 {
     size_t segments = 0;
     Transform mid_pose;
     RobotInterpolationState mid_inter_state(right);
     deque<RobotInterpolationState> state_stack(1, right);
+    vector<RobotInterpolationState> buffer;
     while (!state_stack.empty()) {
         right = state_stack.back();
         interpolator.interpolateByPercentage((right.percentage + left.percentage) * 0.5, mid_pose, left.base_state);
@@ -109,7 +109,7 @@ size_t splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator,
             left = mid_inter_state;
         }
     }
-    return --segments;
+    return true;
 }
 
 template<typename Interpolator, typename IKSolver>
@@ -208,16 +208,18 @@ bool computeCartesianPath(
     linearInterpolationTemplate(params, start_state, interpolator, TestIKSolver(), approximate_steps, back_inserter(traj));
 
     //Сегментация траектории
+    vector<RobotInterpolationState> buf;
+    auto b_inserter = back_inserter(buf);
     for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
 //            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
 //                throw runtime_error("Invalid trajectory!");
-            advance(state_it, splitTrajectoryTemplate(inserter(traj, next(state_it)), interpolator,
-                    TestIKSolver(), params, *state_it, *next(state_it)));
-//                splitTrajectoryTemplate(inserter(traj, state_it), interpolator,
-//                    TestIKSolver(), params, *state_it, *next(state_it));
+            *b_inserter = *state_it;
+            splitTrajectoryTemplate(b_inserter, interpolator, TestIKSolver(), params, *state_it, *next(state_it));
         }
     }
+    *b_inserter = *traj.rbegin();
+    traj = buf;
     return true;
 }
 
@@ -232,7 +234,7 @@ bool computeCartesianPath(
     const RobotInterpolationState start_state = {start_pose, base_state, 0};
     const RobotInterpolationState goal_state = {goal_pose, base_state, 1};
 
-    vector<RobotInterpolationState, allocator<RobotInterpolationState> > wp_traj;
+    vector<RobotInterpolationState> wp_traj;
     if (!computeCartesianPath<PoseAndStateInterpolator>(params, start_state, goal_state, traj, TestIKSolver(),
             const_step, LINEAR_TARGET_PRECISION))
         throw runtime_error("Invalid trajectory!");

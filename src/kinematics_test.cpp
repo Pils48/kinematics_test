@@ -20,7 +20,6 @@
 #include <moveit_visual_tools/moveit_visual_tools.h>
 
 #include "../include/test_linear.h"
-//#include "../src/test_linear.cpp"
 
 using namespace std;
 using namespace moveit;
@@ -59,7 +58,7 @@ int main(int argc, char **argv) {
     const Transform tf_goal(createQuaternionFromRPY(0, 0, 0), Vector3(1.285, 0, 1.565));
 
     LinearParams params = {joint_model_group_ptr, joint_model_group_ptr->getLinkModel(FANUC_M20IA_END_EFFECTOR), Transform::getIdentity()};
-    vector<RobotInterpolationState, allocator<RobotInterpolationState> > trajectory;
+    vector<RobotInterpolationState > trajectory;
     bool ok = computeCartesianPath(params, tf_start, tf_goal, kt_kinematic_state, trajectory, STANDARD_INTERPOLATION_STEP);
 
     for (auto it = trajectory.begin(); it != trajectory.end(); ++it){

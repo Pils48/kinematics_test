@@ -128,7 +128,7 @@ double getFullTranslation(RobotState &state, RobotState &next_state, string link
 
 double getMaxTranslation(RobotState &state, RobotState &next_state);
 
-//double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state);
+double getMaxTranslation(const RobotInterpolationState &state, const RobotInterpolationState &next_state);
 
 void checkAllowedCollision(RobotState &state, planning_scene::PlanningScenePtr current_scene);
 
