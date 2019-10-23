@@ -112,41 +112,52 @@ bool splitTrajectoryTemplate(OutputIterator &&out, Interpolator &interpolator, I
     return true;
 }
 
-template<typename Interpolator, typename IKSolver>
-bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver,
-                                const RobotInterpolationState &left_state, const RobotInterpolationState &right_state)
+void setRobotStates(const LinearParams &params, RobotInterpolationState &left_state, RobotInterpolationState &right_state, RobotState &left, RobotState &right)
 {
-    Transform mid_pose;
     Eigen::Isometry3d left_transform, right_transform;
     transformTFToEigen(left_state.ee_pose, left_transform);
     transformTFToEigen(right_state.ee_pose, right_transform);
-    RobotState left(left_state.base_state);
     left.setFromIK(params.group, left_transform);
-    RobotState right(right_state.base_state);
     right.setFromIK(params.group, right_transform);
-    RobotState mid(left_state.base_state);
+}
 
-    auto dist = left.distance(right);
-    double offset = 0;
-    double percentage = 1;
-    while (percentage >= 0.00005 && dist > CONTINUITY_CHECK_THRESHOLD) {
-        percentage *= 0.5;
-        interpolator.interpolateByPercentage(percentage + offset, mid_pose, mid);
+double getContinuityThreshold(const LinearParams &params, RobotInterpolationState &left_state, RobotInterpolationState &right_state, const double &threshold)
+{
+    RobotState left(left_state.base_state);
+    RobotState right(right_state.base_state);
+    setRobotStates(params, left_state, right_state, left, right);
+    return threshold / left.distance(right);
+}
+
+template<typename Interpolator, typename IKSolver>
+bool checkJumpTemplate(const LinearParams &params, Interpolator &interpolator, IKSolver &&solver,
+                                 RobotInterpolationState left_state, RobotInterpolationState right_state)
+{
+    Transform mid_pose;
+    RobotState mid(left_state.base_state);
+    RobotState left(left_state.base_state);
+    RobotState right(right_state.base_state);
+    setRobotStates(params, left_state, right_state, left_state.base_state, right_state.base_state);
+
+    double continuity_threshold = getContinuityThreshold(params, left_state, right_state, CONTINUITY_CHECK_THRESHOLD);
+    auto dist = left_state.base_state.distance(right_state.base_state);
+    double percentage;
+    while (percentage >= continuity_threshold && dist > CONTINUITY_CHECK_THRESHOLD) {
+        percentage = (left_state.percentage + right_state.percentage) * 0.5;
+        interpolator.interpolateByPercentage(percentage, mid_pose, mid);
         if (!solver.setStateFromIK(params, mid_pose, mid))
             throw runtime_error("Invalid trajectory!");
         auto lm = left.distance(mid);
         auto mr = mid.distance(right);
         if (lm < mr) {
-            offset += percentage;
-            left = mid;
-            dist = mid.distance(right);
+            left_state = {mid_pose, mid,percentage};
+            dist = mid.distance(right_state.base_state);
         } else {
-            offset = (offset - percentage) > 0 ? offset - percentage : 0;
-            right = mid;
-            dist = left.distance(mid);
+            right_state = {mid_pose, mid, percentage};
+            dist = left_state.base_state.distance(mid);
         }
     }
-    if (percentage < 0.00005)
+    if (percentage < continuity_threshold)
         return false;
 
     return true;
@@ -196,9 +207,7 @@ bool computeCartesianPath(
 
     Interpolator interpolator(left_state.ee_pose, right_state.ee_pose, left_state.base_state, right_state.base_state);
 
-    if (solver.setStateFromIK(params, left_state.ee_pose, start_state)){//что делает эта проверка
-        traj.push_back(left_state);
-    }
+    traj.push_back(left_state);
 
     //Проверка траектории на малость
     //NOP
@@ -212,8 +221,8 @@ bool computeCartesianPath(
     auto b_inserter = back_inserter(buf);
     for (auto state_it = traj.begin(); state_it != prev(traj.end()); ++state_it) {
         if (getMaxTranslation(*state_it, *next(state_it)) > LINEAR_TARGET_PRECISION){
-//            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
-//                throw runtime_error("Invalid trajectory!");
+            if (!checkJumpTemplate(params,  interpolator, TestIKSolver(), *state_it, *next(state_it)))
+                throw runtime_error("Invalid trajectory!");
             *b_inserter = *state_it;
             splitTrajectoryTemplate(b_inserter, interpolator, TestIKSolver(), params, *state_it, *next(state_it));
         }
